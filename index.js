@@ -106,6 +106,23 @@ function emitLoopState(session, state) {
 }
 
 /**
+ * Append from inside a `session/event` listener. `Session.append` rejects
+ * reentrant appends while a publication boundary is open, and the listener
+ * runs inside the `turn/end` publication — so the emit is deferred past the
+ * boundary. The round is queued first (below) so a dropped state event can
+ * never wedge the loop: the pill may lag, the rounds never stall.
+ */
+function emitLoopStateSoon(session, state) {
+  queueMicrotask(() => {
+    try {
+      session.append('loop/state', state)
+    } catch (error) {
+      console.warn(`[loop] dropped state event: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
+}
+
+/**
  * Per-instance plugin state. Module-level state would outlive plugin unload
  * and leak across instances, so every apply() builds its own.
  */
@@ -165,12 +182,12 @@ export function apply(ctx) {
       if (!loop) return
       if (loop.rounds !== 0 && loop.run >= loop.rounds) {
         state.loops.delete(session.id)
-        emitLoopState(session, { phase: 'done', command: loop.command, rounds: loop.rounds, run: loop.run })
+        emitLoopStateSoon(session, { phase: 'done', command: loop.command, rounds: loop.rounds, run: loop.run })
         return
       }
       loop.run += 1
-      emitLoopState(session, { phase: 'active', command: loop.command, rounds: loop.rounds, run: loop.run })
       agent.followup(userMessage({ attachments: [], agent }, roundMessage(loop.command, loop.run, loop.rounds)))
+      emitLoopStateSoon(session, { phase: 'active', command: loop.command, rounds: loop.rounds, run: loop.run })
     })
     return () => {
       offTurn?.()

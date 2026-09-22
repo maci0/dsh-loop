@@ -136,7 +136,7 @@ test('non-completed turns and foreign sessions do not advance the loop', () => {
   assert.equal(followups.length, 1, 'only a completed turn on the owning session advances')
 })
 
-test('loop state events ride the session log at every transition', () => {
+test('loop state events ride the session log at every transition', async () => {
   const registered = []
   const listeners = []
   const ctx = {
@@ -151,10 +151,12 @@ test('loop state events ride the session log at every transition', () => {
   ctx.agents.set('s4', agent)
   const turnEnd = { type: 'turn/end', data: { reason: { kind: 'completed' } } }
   const invoke = (input) => registered[0].handler({ rawInput: input, attachments: [], agent })
+  const flush = () => new Promise((resolve) => setImmediate(resolve))
 
   invoke('2 continue')
   listeners[0][1](session, turnEnd)
   listeners[0][1](session, turnEnd)
+  await flush()
   assert.deepEqual(session.appended.map(([type, data]) => [type, data.phase]), [
     ['loop/state', 'active'],
     ['loop/state', 'active'],
@@ -165,6 +167,44 @@ test('loop state events ride the session log at every transition', () => {
   invoke('0 continue')
   invoke('stop')
   assert.deepEqual(session.appended.at(-1)[1].phase, 'stopped')
+})
+
+test('rounds still queue when the state emit is rejected', async () => {
+  // Regression: the turn/end listener runs inside the turn/end publication
+  // boundary, where Session.append rejects reentrant appends. The round must
+  // queue before (and regardless of) the state emit, or the loop wedges at
+  // run 1 with the pill stuck — exactly the reported hang.
+  const registered = []
+  const listeners = []
+  const ctx = {
+    commands: { register: (def) => { registered.push(def); return () => {} } },
+    agents: new Map(),
+    on: (event, fn) => { listeners.push([event, fn]); return () => {} },
+    effect: (fn) => fn(),
+  }
+  apply(ctx)
+  const session = {
+    id: 's5',
+    reentrant: false,
+    append() {
+      if (this.reentrant) throw new Error('session append cannot reenter while another append is being published')
+    },
+  }
+  const followups = []
+  const agent = { session, followup: (m) => followups.push(m) }
+  ctx.agents.set('s5', agent)
+  const turnEnd = { type: 'turn/end', data: { reason: { kind: 'completed' } } }
+  const invoke = (input) => registered[0].handler({ rawInput: input, attachments: [], agent })
+
+  invoke('2 continue')
+  session.reentrant = true
+  listeners[0][1](session, turnEnd)
+  assert.equal(followups.length, 2, 'round 2 queues even when the state emit throws')
+  assert.match(followups[1].content.at(-1).text, /round 2\/2/)
+  listeners[0][1](session, turnEnd)
+  assert.equal(followups.length, 2, 'budget still spends')
+  // The deferred emits still run (and warn) without surfacing.
+  await new Promise((resolve) => setImmediate(resolve))
 })
 
 test('projection unit folds loop/state events and passes others through', () => {
