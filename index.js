@@ -7,6 +7,7 @@
  *
  * Examples:
  *   /loop 10 /perf-review
+ *   /loop 10 /perf-review && /cordis-review
  *   /loop 10 continue
  *   /loop 0 continue
  *   /loop stop
@@ -23,7 +24,12 @@ export const name = 'loop'
 export const inject = ['commands', 'agents']
 
 /**
- * Parse `/loop` arguments: `<rounds> <command...>`, or `stop`.
+ * Parse `/loop` arguments: `<rounds> <command...>`, or `stop`. The command is
+ * free text passed verbatim to the agent each round, so slash-command chains
+ * such as `/perf-review && /cordis-review` replay as written. There is one
+ * deliberate restriction: a nested `/loop stop` would end the loop from
+ * inside its own replay and leave the loop with no way to stop, so it is
+ * rejected before the loop starts.
  * @param {string} input - raw text after `/loop`.
  * @returns {{ kind: 'stop' } | { kind: 'error', text: string } |
  *            { kind: 'loop', rounds: number, command: string }}
@@ -36,7 +42,14 @@ export function parseArgs(input) {
   if (!match) {
     return {
       kind: 'error',
-      text: 'Usage: /loop <rounds> <command> — e.g. /loop 10 /perf-review, /loop 10 continue, /loop 0 continue (0 = forever). Or /loop stop.',
+      text: 'Usage: /loop <rounds> <command> — e.g. /loop 10 /perf-review, /loop 10 /perf-review && /cordis-review, /loop 0 continue (0 = forever). Or /loop stop.',
+    }
+  }
+  const command = match[2].trim()
+  if (/\/loop\s+stop\b/i.test(command)) {
+    return {
+      kind: 'error',
+      text: 'A nested /loop stop would end the loop from inside its own replay. Stop it from the composer instead.',
     }
   }
   const rounds = Number(match[1])

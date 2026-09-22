@@ -3,10 +3,11 @@
 Repeat a command across agent turns in DeepSeek Harness.
 
 ```
-/loop 10 /perf-review   # run /perf-review for 10 rounds
-/loop 10 continue       # send "continue" for 10 rounds
-/loop 0 continue        # loop forever (0 = infinite)
-/loop stop              # end the running loop
+/loop 10 /perf-review               # run /perf-review for 10 rounds
+/loop 10 /perf-review && /cordis-review  # run both commands every round
+/loop 10 continue                   # send "continue" for 10 rounds
+/loop 0 continue                    # loop forever (0 = infinite)
+/loop stop                          # end the running loop
 ```
 
 ## How it works

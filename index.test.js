@@ -7,6 +7,20 @@ test('parseArgs reads the documented forms', () => {
   assert.deepEqual(parseArgs(' 10 continue '), { kind: 'loop', rounds: 10, command: 'continue' })
   assert.deepEqual(parseArgs('0 continue'), { kind: 'loop', rounds: 0, command: 'continue' })
   assert.deepEqual(parseArgs('3 bash -c "echo hi"'), { kind: 'loop', rounds: 3, command: 'bash -c "echo hi"' })
+  assert.deepEqual(
+    parseArgs('10 /perf-review && /cordis-review'),
+    { kind: 'loop', rounds: 10, command: '/perf-review && /cordis-review' },
+  )
+  assert.deepEqual(
+    parseArgs('10 /perf-review; /cordis-review'),
+    { kind: 'loop', rounds: 10, command: '/perf-review; /cordis-review' },
+  )
+})
+
+test('parseArgs rejects a nested /loop stop', () => {
+  const rejected = parseArgs('10 continue && /loop stop')
+  assert.equal(rejected.kind, 'error')
+  assert.match(rejected.text, /nested \/loop stop/)
 })
 
 test('parseArgs rejects malformed input', () => {
