@@ -27,6 +27,8 @@ test('parseArgs rejects malformed input', () => {
   assert.equal(parseArgs('').kind, 'error')
   assert.equal(parseArgs('stop').kind, 'stop')
   assert.equal(parseArgs('Stop').kind, 'stop')
+  assert.equal(parseArgs('pause').kind, 'pause')
+  assert.equal(parseArgs('Resume').kind, 'resume')
   assert.equal(parseArgs('10').kind, 'error', 'rounds without a command')
   assert.equal(parseArgs('abc continue').kind, 'error', 'non-numeric rounds')
   assert.equal(parseArgs('10 ').kind, 'error', 'trailing space is not a command')
@@ -205,6 +207,124 @@ test('rounds still queue when the state emit is rejected', async () => {
   assert.equal(followups.length, 2, 'budget still spends')
   // The deferred emits still run (and warn) without surfacing.
   await new Promise((resolve) => setImmediate(resolve))
+})
+
+test('pause holds the round, resume continues it', async () => {
+  const registered = []
+  const listeners = []
+  const ctx = {
+    commands: { register: (def) => { registered.push(def); return () => {} } },
+    agents: new Map(),
+    on: (event, fn) => { listeners.push([event, fn]); return () => {} },
+    effect: (fn) => fn(),
+  }
+  apply(ctx)
+  const session = { id: 's6', appended: [], append(type, data) { this.appended.push([type, data]) } }
+  const followups = []
+  const agent = { session, followup: (m) => followups.push(m) }
+  ctx.agents.set('s6', agent)
+  const turnEnd = { type: 'turn/end', data: { reason: { kind: 'completed' } } }
+  const invoke = (input) => registered[0].handler({ rawInput: input, attachments: [], agent })
+  const flush = () => new Promise((resolve) => setImmediate(resolve))
+
+  invoke('3 continue')
+  assert.equal(invoke('pause').text, 'Loop for "continue" paused at round 1.')
+  assert.equal(invoke('pause').text, 'Loop for "continue" is already paused at round 1.')
+  listeners[0][1](session, turnEnd)
+  assert.equal(followups.length, 1, 'a completed turn while paused queues nothing')
+
+  assert.equal(invoke('resume').text, 'Loop for "continue" resumed at round 1.')
+  assert.equal(invoke('resume').text, 'Loop for "continue" is already running.')
+  listeners[0][1](session, turnEnd)
+  assert.equal(followups.length, 2, 'resume picks up exactly where it paused')
+  assert.match(followups[1].content.at(-1).text, /round 2\/3/)
+
+  await flush()
+  assert.deepEqual(session.appended.map(([, data]) => data.phase), ['active', 'paused', 'active', 'active'])
+
+  assert.equal(invoke('stop').text, 'Loop for "continue" stopped after 2 round(s).')
+})
+
+test('pause and resume need a running loop', () => {
+  const registered = []
+  const ctx = {
+    commands: { register: (def) => { registered.push(def); return () => {} } },
+    agents: new Map(),
+    on: () => () => {},
+    effect: (fn) => fn(),
+  }
+  apply(ctx)
+  const agent = { session: { id: 's7', append() {} }, followup: () => {} }
+  const invoke = (input) => registered[0].handler({ rawInput: input, attachments: [], agent })
+  assert.equal(invoke('pause').text, 'No loop is running.')
+  assert.equal(invoke('resume').text, 'No loop is running.')
+})
+
+test('verbs adopt the durable fold after the process forgets the loop', async () => {
+  // Regression: a restart wipes the round-driver map while the projected
+  // `loop/state` fold survives, so the pill stays up and `/loop stop`
+  // answers "No loop is running". The verbs must reconcile from the fold.
+  const registered = []
+  const listeners = []
+  // The fake fold tracks appends, like the real projection unit would.
+  const projected = { phase: 'active', command: 'continue', rounds: 10, run: 1 }
+  const ctx = {
+    commands: { register: (def) => { registered.push(def); return () => {} } },
+    agents: new Map(),
+    on: (event, fn) => { listeners.push([event, fn]); return () => {} },
+    effect: (fn) => fn(),
+    get: (key) => key === 'sessionProjections'
+      ? { stateOf: () => ({ ...projected }) }
+      : undefined,
+  }
+  apply(ctx)
+  const session = {
+    id: 's8',
+    appended: [],
+    append(type, data) {
+      this.appended.push([type, data])
+      if (type === 'loop/state') Object.assign(projected, data)
+    },
+  }
+  const followups = []
+  const agent = { session, followup: (m) => followups.push(m) }
+  ctx.agents.set('s8', agent)
+  const turnEnd = { type: 'turn/end', data: { reason: { kind: 'completed' } } }
+  const invoke = (input) => registered[0].handler({ rawInput: input, attachments: [], agent })
+
+  // Stop lands on the adopted entry and clears the pill.
+  assert.equal(invoke('stop').text, 'Loop for "continue" stopped after 1 round(s).')
+  assert.deepEqual(session.appended.at(-1)[1], { phase: 'stopped', command: 'continue', rounds: 10, run: 1 })
+  assert.equal(invoke('stop').text, 'No loop is running.', 'stopped stays dead, never re-adopts')
+
+  // Pause adopts, holds, and resumes across the same gap.
+  projected.phase = 'active'
+  assert.equal(invoke('pause').text, 'Loop for "continue" paused at round 1.')
+  listeners[0][1](session, turnEnd)
+  assert.equal(followups.length, 0, 'adopted pause holds the round')
+  assert.equal(invoke('resume').text, 'Loop for "continue" resumed at round 1.')
+  listeners[0][1](session, turnEnd)
+  assert.equal(followups.length, 1, 'adopted resume drives the next round')
+  assert.match(followups[0].content.at(-1).text, /round 2\/10/)
+})
+
+test('verbs ignore a dead or absent fold', () => {
+  for (const fold of [undefined, null, { phase: 'stopped', command: 'x', rounds: 2, run: 2 }, { phase: 'done', command: 'x', rounds: 2, run: 2 }]) {
+    const registered = []
+    const ctx = {
+      commands: { register: (def) => { registered.push(def); return () => {} } },
+      agents: new Map(),
+      on: () => () => {},
+      effect: (fn) => fn(),
+      get: () => ({ stateOf: () => fold }),
+    }
+    apply(ctx)
+    const agent = { session: { id: 's9', append() {} }, followup: () => {} }
+    const invoke = (input) => registered[0].handler({ rawInput: input, attachments: [], agent })
+    assert.equal(invoke('stop').text, 'No loop is running.', `fold ${JSON.stringify(fold)} stays dead`)
+    assert.equal(invoke('pause').text, 'No loop is running.')
+    assert.equal(invoke('resume').text, 'No loop is running.')
+  }
 })
 
 test('projection unit folds loop/state events and passes others through', () => {

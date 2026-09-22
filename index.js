@@ -10,6 +10,8 @@
  *   /loop 10 /perf-review && /cordis-review
  *   /loop 10 continue
  *   /loop 0 continue
+ *   /loop pause
+ *   /loop resume
  *   /loop stop
  *
  * Load via a row in ~/.dsh/profiles/<profile>/cordis.patch.yml, or
@@ -24,25 +26,29 @@ export const name = 'loop'
 export const inject = ['commands', 'agents']
 
 /**
- * Parse `/loop` arguments: `<rounds> <command...>`, or `stop`. The command is
- * free text passed verbatim to the agent each round, so slash-command chains
- * such as `/perf-review && /cordis-review` replay as written. There is one
- * deliberate restriction: a nested `/loop stop` would end the loop from
- * inside its own replay and leave the loop with no way to stop, so it is
- * rejected before the loop starts.
+ * Parse `/loop` arguments: `<rounds> <command...>`, or `pause` / `resume` /
+ * `stop`. The command is free text passed verbatim to the agent each round,
+ * so slash-command chains such as `/perf-review && /cordis-review` replay as
+ * written. There is one deliberate restriction: a nested `/loop stop` would
+ * end the loop from inside its own replay and leave the loop with no way to
+ * stop, so it is rejected before the loop starts.
  * @param {string} input - raw text after `/loop`.
- * @returns {{ kind: 'stop' } | { kind: 'error', text: string } |
+ * @returns {{ kind: 'pause' } | { kind: 'resume' } | { kind: 'stop' } |
+ *            { kind: 'error', text: string } |
  *            { kind: 'loop', rounds: number, command: string }}
  *   `rounds` is the total round budget; 0 means infinite.
  */
 export function parseArgs(input) {
   const trimmed = input.trim()
-  if (trimmed.toLowerCase() === 'stop') return { kind: 'stop' }
+  const verb = trimmed.toLowerCase()
+  if (verb === 'stop') return { kind: 'stop' }
+  if (verb === 'pause') return { kind: 'pause' }
+  if (verb === 'resume') return { kind: 'resume' }
   const match = /^(\d+)\s+(.+)$/.exec(trimmed)
   if (!match) {
     return {
       kind: 'error',
-      text: 'Usage: /loop <rounds> <command> — e.g. /loop 10 /perf-review, /loop 10 /perf-review && /cordis-review, /loop 0 continue (0 = forever). Or /loop stop.',
+      text: 'Usage: /loop <rounds> <command> — e.g. /loop 10 /perf-review, /loop 10 /perf-review && /cordis-review, /loop 0 continue (0 = forever). Or /loop pause | resume | stop.',
     }
   }
   const command = match[2].trim()
@@ -75,7 +81,7 @@ export function roundMessage(command, run, rounds) {
  * @param {object} state - { phase, command, rounds, run }.
  */
 const loopStateSchema = z.object({
-  phase: z.enum(['active', 'stopped', 'done']),
+  phase: z.enum(['active', 'paused', 'stopped', 'done']),
   command: z.string().min(1),
   rounds: z.number().int().nonnegative(),
   run: z.number().int().positive(),
@@ -133,17 +139,70 @@ function userMessage(invocation, text) {
   })
 }
 
-function loopHandler(invocation, state) {
+/**
+ * Read the durable loop fold for one session. The round driver's `loops` map
+ * is process memory and dies on restart; the `loop/state` log plus the
+ * projection unit survive. Without this fallback, a restart leaves the pill
+ * showing an active loop the verbs cannot see — `/loop stop` answers "No
+ * loop is running" while the pill never clears.
+ */
+function readProjectedLoop(ctx, session) {
+  try {
+    const projected = ctx.get?.('sessionProjections')?.stateOf?.(session, 'loop')
+    if (!projected || typeof projected !== 'object') return undefined
+    return projected
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The loop for one session: the live map entry, or the durable fold adopted
+ * back into the map when the process forgot it (restart, remount). Only an
+ * `active` or `paused` fold adopts — `stopped` and `done` stay dead.
+ */
+function liveLoop(ctx, state, session) {
+  const loop = state.loops.get(session.id)
+  if (loop) return loop
+  const projected = readProjectedLoop(ctx, session)
+  if (!projected || (projected.phase !== 'active' && projected.phase !== 'paused')) return undefined
+  const adopted = {
+    command: projected.command,
+    rounds: projected.rounds,
+    run: projected.run,
+    paused: projected.phase === 'paused',
+  }
+  state.loops.set(session.id, adopted)
+  return adopted
+}
+
+function loopHandler(invocation, state, ctx) {
   const parsed = parseArgs(invocation.rawInput)
   if (parsed.kind === 'error') return { kind: 'error', text: parsed.text }
 
   const sessionId = invocation.agent.session.id
   if (parsed.kind === 'stop') {
-    const loop = state.loops.get(sessionId)
+    const loop = liveLoop(ctx, state, invocation.agent.session)
     if (!loop) return { kind: 'success', text: 'No loop is running.' }
     state.loops.delete(sessionId)
     emitLoopState(invocation.agent.session, { phase: 'stopped', command: loop.command, rounds: loop.rounds, run: loop.run })
     return { kind: 'success', text: `Loop for "${loop.command}" stopped after ${loop.run} round(s).` }
+  }
+  if (parsed.kind === 'pause') {
+    const loop = liveLoop(ctx, state, invocation.agent.session)
+    if (!loop) return { kind: 'success', text: 'No loop is running.' }
+    if (loop.paused) return { kind: 'success', text: `Loop for "${loop.command}" is already paused at round ${loop.run}.` }
+    loop.paused = true
+    emitLoopState(invocation.agent.session, { phase: 'paused', command: loop.command, rounds: loop.rounds, run: loop.run })
+    return { kind: 'success', text: `Loop for "${loop.command}" paused at round ${loop.run}.` }
+  }
+  if (parsed.kind === 'resume') {
+    const loop = liveLoop(ctx, state, invocation.agent.session)
+    if (!loop) return { kind: 'success', text: 'No loop is running.' }
+    if (!loop.paused) return { kind: 'success', text: `Loop for "${loop.command}" is already running.` }
+    loop.paused = false
+    emitLoopState(invocation.agent.session, { phase: 'active', command: loop.command, rounds: loop.rounds, run: loop.run })
+    return { kind: 'success', text: `Loop for "${loop.command}" resumed at round ${loop.run}.` }
   }
 
   state.loops.set(sessionId, { command: parsed.command, rounds: parsed.rounds, run: 1 })
@@ -168,18 +227,20 @@ export function apply(ctx) {
     disposers.push(ctx.commands.register({
       definitionId: 'dsh-loop:loop',
       name: 'loop',
-      description: '⟳ Repeat a command each turn: /loop <rounds> <command> (0 = forever), /loop stop',
-      input: { hint: '<rounds> <command> | stop', attachments: true },
+      description: '⟳ Repeat a command each turn: /loop <rounds> <command> (0 = forever), /loop pause | resume | stop',
+      input: { hint: '<rounds> <command> | pause | resume | stop', attachments: true },
       recordInput: false,
-      handler: (inv) => loopHandler(inv, state),
+      handler: (inv) => loopHandler(inv, state, ctx),
     }))
     // After each completed turn, queue the next round until the budget spends.
+    // A paused loop holds its round: the completed turn settles with nothing
+    // queued, and resume picks up exactly where it left off.
     const offTurn = ctx.on('session/event', (session, event) => {
       if (event?.type !== 'turn/end' || event?.data?.reason?.kind !== 'completed') return
       const agent = ctx.agents.get(session.id)
       if (!agent || agent.session !== session) return
       const loop = state.loops.get(session.id)
-      if (!loop) return
+      if (!loop || loop.paused) return
       if (loop.rounds !== 0 && loop.run >= loop.rounds) {
         state.loops.delete(session.id)
         emitLoopStateSoon(session, { phase: 'done', command: loop.command, rounds: loop.rounds, run: loop.run })

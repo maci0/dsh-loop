@@ -7,6 +7,8 @@ Repeat a command across agent turns in DeepSeek Harness.
 /loop 10 /perf-review && /cordis-review  # run both commands every round
 /loop 10 continue                   # send "continue" for 10 rounds
 /loop 0 continue                    # loop forever (0 = infinite)
+/loop pause                         # hold the round; resume picks it back up
+/loop resume                        # continue a paused loop
 /loop stop                          # end the running loop
 ```
 
@@ -31,10 +33,19 @@ row automatically.
 
 ## The pill
 
-While a loop is active, a pill (`⟳ command run/rounds` + Stop) docks above the
-composer — the same `conversation.input.dock` strip as the goal bar. State
-path: the host half appends whole-state `loop/state` session events on start,
-each round, stop, and completion; a `sessionProjections` unit (key `loop`)
-folds them, and the client half reads the projected view via
-`useProjection('loop')` — push-based, no polling, correct across reloads.
-The Stop button submits the host-side `/loop stop` command (no model turn).
+While a loop is active or paused, a pill (`⟳ command run/rounds` + Pause /
+Resume + Stop) docks in the same `conversation.input.dock` strip as the goal
+bar, ordered right beside it. State path: the host half appends whole-state
+`loop/state` session events on start, each round, pause, resume, stop, and
+completion; a `sessionProjections` unit (key `loop`) folds them, and the
+client half reads the projected view via `useProjection('loop')` —
+push-based, no polling, correct across reloads. The buttons submit the
+host-side `/loop pause | resume | stop` commands (no model turn).
+
+## Restarts
+
+The round driver is process memory; the `loop/state` log is durable. After a
+restart the verbs re-adopt an `active` or `paused` fold from the projection
+registry, so `/loop stop` clears a pill the fresh process never started —
+the pill can never strand. `stopped` and `done` folds stay dead and are never
+re-adopted.
