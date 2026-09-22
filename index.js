@@ -73,15 +73,39 @@ export function roundMessage(command, run, rounds) {
 }
 
 // --- projection: the /loop pill's live state ---
+//
+// The pill folds only events the harness already understands — `command/run`
+// (the loop's own lifecycle row) and the `user/message` relay lines the
+// driver queues each round — so the plugin never appends a custom event
+// type. A custom `loop/state` type would poison the log: the persistence
+// read path refuses any session containing an unknown non-ignorable type,
+// and the envelope marker cannot be attached through `Session.append`.
+// Out-of-repo plugins cannot extend the known-type catalog, so the durable
+// fold reads only canonical history.
 
 /**
- * Whole loop state as a durable `loop/state` session event (whole-value rule:
- * each event carries the complete post-change state, never a delta). The
- * projection unit below folds these; the client pill reads the projected view.
- * @param {object} state - { phase, command, rounds, run }.
+ * Parse one round relay line back into its loop fields. Returns `undefined`
+ * for any message the driver did not write.
  */
+export function parseRoundLine(text) {
+  const match = /^\[loop round (\d+)\/(.+?)\]\n([\s\S]+)$/.exec(text)
+  if (!match) return undefined
+  const run = Number(match[1])
+  const budget = match[2] === '∞ (stop with /loop stop)' ? 0 : Number(match[2])
+  const command = match[3].trim()
+  if (!Number.isInteger(run) || run < 1 || !Number.isInteger(budget) || budget < 0 || command === '') return undefined
+  return { run, rounds: budget, command }
+}
+
+/** True for a message the loop driver queued. */
+function isLoopRelay(event) {
+  return event.type === 'user/message'
+    && event.data?.source?.kind === 'plugin'
+    && event.data?.source?.plugin === 'loop'
+}
+
 const loopStateSchema = z.object({
-  phase: z.enum(['active', 'paused', 'stopped', 'done']),
+  phase: z.enum(['active', 'paused']),
   command: z.string().min(1),
   rounds: z.number().int().nonnegative(),
   run: z.number().int().positive(),
@@ -90,7 +114,11 @@ const loopStateSchema = z.object({
 const loopProjectionSchema = loopStateSchema.nullable()
 
 /**
- * The projection unit: fold `loop/state` events into the pill's client view.
+ * The projection unit: fold the loop's own `command/run` rows (start, pause,
+ * resume, stop — the definition records input, so `args` carries the verb
+ * verbatim) and the claimed `user/message` relay lines (round counter
+ * advances) into the pill's client view. A claimed stop/pause/resume
+ * `command/done` row clears or freezes the pill without any custom event.
  * Registered through `ctx.inject(['sessionProjections'], …)` so headless
  * assemblies without the registry stay unaffected.
  */
@@ -98,34 +126,31 @@ export const loopProjection = {
   key: 'loop',
   stateSchema: loopProjectionSchema,
   init: () => null,
-  apply: (state, event) => event.type === 'loop/state' ? event.data : state,
+  apply: (state, event) => {
+    if (event.type === 'command/run' && event.data?.name === 'loop' && typeof event.data?.args === 'string') {
+      const parsed = parseArgs(event.data.args)
+      if (parsed.kind === 'loop') {
+        return { phase: 'active', command: parsed.command, rounds: parsed.rounds, run: 1 }
+      }
+      if ((parsed.kind === 'pause' || parsed.kind === 'resume') && state) {
+        return { ...state, phase: parsed.kind === 'pause' ? 'paused' : 'active' }
+      }
+      if (parsed.kind === 'stop') return null
+      return state
+    }
+    if (event.type === 'command/done' && event.data?.name === 'loop') return state
+    if (!isLoopRelay(event)) return state
+    const blocks = Array.isArray(event.data?.content) ? event.data.content : []
+    const text = blocks.filter((block) => block?.type === 'text').map((block) => block.text).join('')
+    const round = parseRoundLine(text)
+    if (!round) return state
+    return { phase: 'active', command: round.command, rounds: round.rounds, run: round.run }
+  },
   wire: {
     viewSchema: loopProjectionSchema,
     view: state => state,
   },
-  stateVersion: 1,
-}
-
-/** Append one whole loop-state event to the session log. */
-function emitLoopState(session, state) {
-  session.append('loop/state', state)
-}
-
-/**
- * Append from inside a `session/event` listener. `Session.append` rejects
- * reentrant appends while a publication boundary is open, and the listener
- * runs inside the `turn/end` publication — so the emit is deferred past the
- * boundary. The round is queued first (below) so a dropped state event can
- * never wedge the loop: the pill may lag, the rounds never stall.
- */
-function emitLoopStateSoon(session, state) {
-  queueMicrotask(() => {
-    try {
-      session.append('loop/state', state)
-    } catch (error) {
-      console.warn(`[loop] dropped state event: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  })
+  stateVersion: 2,
 }
 
 /**
@@ -185,7 +210,6 @@ function loopHandler(invocation, state, ctx) {
     const loop = liveLoop(ctx, state, invocation.agent.session)
     if (!loop) return { kind: 'success', text: 'No loop is running.' }
     state.loops.delete(sessionId)
-    emitLoopState(invocation.agent.session, { phase: 'stopped', command: loop.command, rounds: loop.rounds, run: loop.run })
     return { kind: 'success', text: `Loop for "${loop.command}" stopped after ${loop.run} round(s).` }
   }
   if (parsed.kind === 'pause') {
@@ -193,7 +217,6 @@ function loopHandler(invocation, state, ctx) {
     if (!loop) return { kind: 'success', text: 'No loop is running.' }
     if (loop.paused) return { kind: 'success', text: `Loop for "${loop.command}" is already paused at round ${loop.run}.` }
     loop.paused = true
-    emitLoopState(invocation.agent.session, { phase: 'paused', command: loop.command, rounds: loop.rounds, run: loop.run })
     return { kind: 'success', text: `Loop for "${loop.command}" paused at round ${loop.run}.` }
   }
   if (parsed.kind === 'resume') {
@@ -201,12 +224,10 @@ function loopHandler(invocation, state, ctx) {
     if (!loop) return { kind: 'success', text: 'No loop is running.' }
     if (!loop.paused) return { kind: 'success', text: `Loop for "${loop.command}" is already running.` }
     loop.paused = false
-    emitLoopState(invocation.agent.session, { phase: 'active', command: loop.command, rounds: loop.rounds, run: loop.run })
     return { kind: 'success', text: `Loop for "${loop.command}" resumed at round ${loop.run}.` }
   }
 
   state.loops.set(sessionId, { command: parsed.command, rounds: parsed.rounds, run: 1 })
-  emitLoopState(invocation.agent.session, { phase: 'active', command: parsed.command, rounds: parsed.rounds, run: 1 })
   invocation.agent.followup(userMessage(invocation, roundMessage(parsed.command, 1, parsed.rounds)))
   return {
     kind: 'success',
@@ -229,12 +250,12 @@ export function apply(ctx) {
       name: 'loop',
       description: '⟳ Repeat a command each turn: /loop <rounds> <command> (0 = forever), /loop pause | resume | stop',
       input: { hint: '<rounds> <command> | pause | resume | stop', attachments: true },
-      recordInput: false,
       handler: (inv) => loopHandler(inv, state, ctx),
     }))
     // After each completed turn, queue the next round until the budget spends.
     // A paused loop holds its round: the completed turn settles with nothing
-    // queued, and resume picks up exactly where it left off.
+    // queued, and resume picks up exactly where it left off. The pill follows
+    // the claimed `user/message` relay lines, so the driver appends nothing.
     const offTurn = ctx.on('session/event', (session, event) => {
       if (event?.type !== 'turn/end' || event?.data?.reason?.kind !== 'completed') return
       const agent = ctx.agents.get(session.id)
@@ -243,12 +264,19 @@ export function apply(ctx) {
       if (!loop || loop.paused) return
       if (loop.rounds !== 0 && loop.run >= loop.rounds) {
         state.loops.delete(session.id)
-        emitLoopStateSoon(session, { phase: 'done', command: loop.command, rounds: loop.rounds, run: loop.run })
         return
       }
       loop.run += 1
-      agent.followup(userMessage({ attachments: [], agent }, roundMessage(loop.command, loop.run, loop.rounds)))
-      emitLoopStateSoon(session, { phase: 'active', command: loop.command, rounds: loop.rounds, run: loop.run })
+      const run = loop.run
+      // The round waits for quiescence: `followup` appends, and a session
+      // refuses an append that reenters the event being published, while a
+      // wake delivered before the retiring turn settles never opens a turn.
+      // A stop, pause, or restart during the wait re-checks.
+      void agent.whenIdle().then(() => {
+        if (state.loops.get(session.id) !== loop || loop.paused) return
+        if (ctx.agents.get(session.id) !== agent) return
+        agent.followup(userMessage({ attachments: [], agent }, roundMessage(loop.command, run, loop.rounds)))
+      }, () => {})
     })
     return () => {
       offTurn?.()

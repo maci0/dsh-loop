@@ -19,6 +19,11 @@ Repeat a command across agent turns in DeepSeek Harness.
 budget is spent. `rounds = 0` never spends; `/loop stop` cancels at any time.
 Loops are per-session; only a *completed* turn advances the round.
 
+A round is queued once the agent reaches quiescence (`Agent.whenIdle()`),
+never from inside the `turn/end` publication: `followup()` appends, a session
+refuses an append that reenters the event it is publishing, and a wake
+delivered before the retiring turn settles opens no turn.
+
 ## Install
 
 `dsh plugin add dsh-loop`, or add the package to your profile's
@@ -29,23 +34,25 @@ row automatically.
 
 - A command that names a skill (`/perf-review`) is queued as a user message
   containing that command; the agent invokes the skill on its turn.
-- No round cap on infinite loops — it runs until `/loop stop`. Watch quota.
+- No round cap on infinite loops: it runs until `/loop stop`. Watch quota.
 
 ## The pill
 
 While a loop is active or paused, a pill (`⟳ command run/rounds` + Pause /
 Resume + Stop) docks in the same `conversation.input.dock` strip as the goal
-bar, ordered right beside it. State path: the host half appends whole-state
-`loop/state` session events on start, each round, pause, resume, stop, and
-completion; a `sessionProjections` unit (key `loop`) folds them, and the
-client half reads the projected view via `useProjection('loop')` —
-push-based, no polling, correct across reloads. The buttons submit the
+bar, ordered right beside it. State path: a `sessionProjections` unit (key
+`loop`) folds events the harness already understands, the plugin's own
+`command/run` rows and the `user/message` relay lines the driver queues each
+round, and the client half reads the projected view via
+`useProjection('loop')`, push-based, no polling, correct across reloads. The
+driver appends no custom event type: an unknown non-ignorable type makes the
+persistence read path refuse the whole session. The buttons submit the
 host-side `/loop pause | resume | stop` commands (no model turn).
 
 ## Restarts
 
-The round driver is process memory; the `loop/state` log is durable. After a
+The round driver is process memory; the folded log is durable. After a
 restart the verbs re-adopt an `active` or `paused` fold from the projection
-registry, so `/loop stop` clears a pill the fresh process never started —
-the pill can never strand. `stopped` and `done` folds stay dead and are never
+registry, so `/loop stop` clears a pill the fresh process never started and
+the pill can never strand. A stopped or spent fold stays dead and is never
 re-adopted.
