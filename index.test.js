@@ -343,7 +343,7 @@ test('projection unit folds the loop lifecycle without custom events', () => {
   const relay = (run, rounds) => ({
     type: 'user/message',
     data: {
-      source: { kind: 'plugin', plugin: 'loop', form: 'relay' },
+      source: { kind: 'loop', form: 'relay' },
       content: [{ type: 'text', text: `[loop round ${run}/${rounds}]\ncontinue` }],
     },
   })
@@ -370,7 +370,7 @@ test('projection unit folds the loop lifecycle without custom events', () => {
   }), resumed)
   assert.equal(loopProjection.apply(resumed, {
     type: 'user/message',
-    data: { source: { kind: 'plugin', plugin: 'other', form: 'relay' }, content: [{ type: 'text', text: '[loop round 9/5]\nforged' }] },
+    data: { source: { kind: 'other', form: 'relay' }, content: [{ type: 'text', text: '[loop round 9/5]\nforged' }] },
   }), resumed, 'a forged relay from another plugin cannot move the counter')
 
   // The wire schema validates the view before it leaves the host.
@@ -386,4 +386,36 @@ test('round-line parsing rejects garbage', () => {
   assert.deepEqual(parseRoundLine('[loop round 4/∞ (stop with /loop stop)]\n/perf-review'), {
     run: 4, rounds: 0, command: '/perf-review',
   })
+})
+
+test('fold rejects foreign events by reference within a CPU band', () => {
+  // Deterministic perf gate: the fold runs on EVERY committed session event,
+  // so foreign events must cost ~nothing and allocate nothing. Asserts on
+  // process CPU time (never wall clock), median of 5 runs after warmup, with
+  // a generous band — a regression that adds parsing/allocation to the
+  // reject path breaks the band long before users feel it.
+  // Host: process.cpuUsage; perf events unavailable in this container, stated.
+  const events = [
+    { type: 'turn/end', data: { reason: { kind: 'completed' } } },
+    { type: 'assistant/message', data: {} },
+    { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] } },
+    { type: 'command/run', data: { commandId: 'c', name: 'goal', args: 'x', source: { kind: 'user' } } },
+  ]
+  const live = { phase: 'active', command: 'continue', rounds: 5, run: 2 }
+  for (const event of events) {
+    assert.equal(loopProjection.apply(null, event), null)
+    assert.equal(loopProjection.apply(live, event), live, `${event.type} must keep the reference`)
+  }
+  const ITERS = 100000
+  for (let i = 0; i < 20000; i++) for (const event of events) loopProjection.apply(live, event)
+  const samples = []
+  for (let r = 0; r < 5; r++) {
+    const c0 = process.cpuUsage()
+    for (let i = 0; i < ITERS; i++) for (const event of events) loopProjection.apply(live, event)
+    const c1 = process.cpuUsage(c0)
+    samples.push(((c1.user + c1.system) / (ITERS * events.length)) * 1000)
+  }
+  samples.sort((a, b) => a - b)
+  const median = samples[2]
+  assert.ok(median < 500, `foreign fold median ${median.toFixed(1)}ns CPU/op exceeds 500ns band`)
 })

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Loop",
+    "description": "Repeat a command across turns with /loop; /loop stop ends it."
+  }
+}

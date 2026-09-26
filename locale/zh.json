@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "循环",
+    "description": "用 /loop 跨回合重复一条命令；/loop stop 结束。"
+  }
+}

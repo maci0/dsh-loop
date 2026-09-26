@@ -100,8 +100,7 @@ export function parseRoundLine(text) {
 /** True for a message the loop driver queued. */
 function isLoopRelay(event) {
   return event.type === 'user/message'
-    && event.data?.source?.kind === 'plugin'
-    && event.data?.source?.plugin === 'loop'
+    && event.data?.source?.kind === 'loop'
 }
 
 const loopStateSchema = z.object({
@@ -160,7 +159,7 @@ export const loopProjection = {
 function userMessage(invocation, text) {
   return createUserMessage({
     content: [...invocation.attachments, { type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'loop', form: 'relay' },
+    source: { kind: 'loop', form: 'relay' },
   })
 }
 

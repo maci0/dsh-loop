@@ -1,6 +1,6 @@
 {
   "name": "dsh-loop",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "main": "index.js",
@@ -12,6 +12,7 @@
       "default": "./lib/client.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "dsh": {
@@ -32,6 +33,8 @@
     }
   },
   "files": [
+    "icon.svg",
+    "locale/*.json",
     "index.js",
     "lib/client.js",
     "cordis.patch.yml",
@@ -64,5 +67,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/maci0/dsh-loop.git"
-  }
+  },
+  "icon": "./icon.svg"
 }
