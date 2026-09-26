@@ -10,13 +10,16 @@ Repeat a command across agent turns in DeepSeek Harness.
 /loop pause                         # hold the round; resume picks it back up
 /loop resume                        # continue a paused loop
 /loop stop                          # end the running loop
+/loop status                        # what is running, and how far along
 ```
 
 ## How it works
 
 `/loop <rounds> <command>` queues the command as the agent's next turn (round
 1). After each completed turn, the plugin queues the next round until the
-budget is spent. `rounds = 0` never spends; `/loop stop` cancels at any time.
+budget is spent. `rounds = 0` never spends; `/loop stop` cancels at any time,
+and `/loop status` answers whether one is running, paused, and at which round —
+the pill shows the same state, but only the Web client has a pill.
 Loops are per-session; only a *completed* turn advances the round.
 
 A round is queued once the agent reaches quiescence (`Agent.whenIdle()`),

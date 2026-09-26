@@ -32,6 +32,8 @@ test('parseArgs rejects malformed input', () => {
   assert.equal(parseArgs('Stop').kind, 'stop')
   assert.equal(parseArgs('pause').kind, 'pause')
   assert.equal(parseArgs('Resume').kind, 'resume')
+  assert.equal(parseArgs('status').kind, 'status')
+  assert.equal(parseArgs('List').kind, 'status', 'a list verb answers the same question')
   assert.equal(parseArgs('10').kind, 'error', 'rounds without a command')
   assert.equal(parseArgs('abc continue').kind, 'error', 'non-numeric rounds')
   assert.equal(parseArgs('10 ').kind, 'error', 'trailing space is not a command')
@@ -122,6 +124,42 @@ test('infinite loop keeps queueing until /loop stop', async () => {
   assert.equal(followups.length, 4, 'stopped loop queues nothing')
 
   assert.equal(invoke('stop').text, 'No loop is running.')
+})
+
+test('/loop status reports the live loop, and nothing when there is none', async () => {
+  const registered = []
+  const listeners = []
+  const ctx = {
+    commands: { register: (def) => { registered.push(def); return () => {} } },
+    agents: new Map(),
+    on: (event, fn) => { listeners.push([event, fn]); return () => {} },
+    effect: (fn) => fn(),
+  }
+  apply(ctx)
+  const session = { id: 's3', appended: [], append(type, data) { this.appended.push([type, data]) } }
+  const followups = []
+  const agent = { session, whenIdle: () => Promise.resolve(), followup: (m) => followups.push(m) }
+  ctx.agents.set('s3', agent)
+  const turnEnd = { type: 'turn/end', data: { reason: { kind: 'completed' } } }
+  const invoke = (input) => registered[0].handler({ rawInput: input, attachments: [], agent })
+
+  assert.equal(invoke('status').text, 'No loop is running.')
+
+  invoke('4 /perf-review')
+  assert.equal(
+    invoke('status').text,
+    'Loop for "/perf-review" is running — round 1 of 4.',
+  )
+
+  listeners[0][1](session, turnEnd)
+  await settle()
+  assert.equal(invoke('status').text, 'Loop for "/perf-review" is running — round 2 of 4.')
+
+  invoke('pause')
+  assert.equal(invoke('status').text, 'Loop for "/perf-review" is paused — round 2 of 4.')
+
+  invoke('stop')
+  assert.equal(invoke('status').text, 'No loop is running.')
 })
 
 test('non-completed turns and foreign sessions do not advance the loop', () => {

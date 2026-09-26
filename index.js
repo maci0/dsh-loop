@@ -44,11 +44,14 @@ export function parseArgs(input) {
   if (verb === 'stop') return { kind: 'stop' }
   if (verb === 'pause') return { kind: 'pause' }
   if (verb === 'resume') return { kind: 'resume' }
+  // A status verb exists because the pill is a Web surface: a session driven
+  // from a terminal has no other way to ask whether a loop is running.
+  if (verb === 'status' || verb === 'list') return { kind: 'status' }
   const match = /^(\d+)\s+(.+)$/.exec(trimmed)
   if (!match) {
     return {
       kind: 'error',
-      text: 'Usage: /loop <rounds> <command> — e.g. /loop 10 /perf-review, /loop 10 /perf-review && /cordis-review, /loop 0 continue (0 = forever). Or /loop pause | resume | stop.',
+      text: 'Usage: /loop <rounds> <command> — e.g. /loop 10 /perf-review, /loop 10 /perf-review && /cordis-review, /loop 0 continue (0 = forever). Or /loop pause | resume | stop | status.',
     }
   }
   const command = match[2].trim()
@@ -211,6 +214,15 @@ function loopHandler(invocation, state, ctx) {
     state.loops.delete(sessionId)
     return { kind: 'success', text: `Loop for "${loop.command}" stopped after ${loop.run} round(s).` }
   }
+  if (parsed.kind === 'status') {
+    const loop = liveLoop(ctx, state, invocation.agent.session)
+    if (!loop) return { kind: 'success', text: 'No loop is running.' }
+    const state_ = loop.paused ? 'paused' : 'running'
+    return {
+      kind: 'success',
+      text: `Loop for "${loop.command}" is ${state_} — round ${loop.run} of ${budgetLabel(loop.rounds)}.`,
+    }
+  }
   if (parsed.kind === 'pause') {
     const loop = liveLoop(ctx, state, invocation.agent.session)
     if (!loop) return { kind: 'success', text: 'No loop is running.' }
@@ -247,8 +259,8 @@ export function apply(ctx) {
     disposers.push(ctx.commands.register({
       definitionId: 'dsh-loop:loop',
       name: 'loop',
-      description: '⟳ Repeat a command each turn: /loop <rounds> <command> (0 = forever), /loop pause | resume | stop',
-      input: { hint: '<rounds> <command> | pause | resume | stop', attachments: true },
+      description: '⟳ Repeat a command each turn: /loop <rounds> <command> (0 = forever), /loop pause | resume | stop | status',
+      input: { hint: '<rounds> <command> | pause | resume | stop | status', attachments: true },
       handler: (inv) => loopHandler(inv, state, ctx),
     }))
     // After each completed turn, queue the next round until the budget spends.
