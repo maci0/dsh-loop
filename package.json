@@ -42,7 +42,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test index.test.js"
+    "test": "node --test index.test.js composition.test.js"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
