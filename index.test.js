@@ -242,7 +242,8 @@ test('pause holds the round, resume continues it', async () => {
 
   assert.equal(invoke('resume').text, 'Loop for "continue" resumed at round 1.')
   assert.equal(invoke('resume').text, 'Loop for "continue" is already running.')
-  listeners[0][1](session, turnEnd)
+  // Resume queues the held round itself; no later turn/end exists to drive it,
+  // since pause and resume are plugin commands.
   await settle()
   assert.equal(followups.length, 2, 'resume picks up exactly where it paused')
   assert.match(followups[1].content.at(-1).text, /round 2\/3/)
@@ -341,7 +342,6 @@ test('verbs adopt the durable fold after the process forgets the loop', async ()
   await settle()
   assert.equal(followups.length, 0, 'adopted pause holds the round')
   assert.equal(invoke('resume').text, 'Loop for "continue" resumed at round 1.')
-  listeners[0][1](session, turnEnd)
   await settle()
   assert.equal(followups.length, 1, 'adopted resume drives the next round')
   assert.match(followups[0].content.at(-1).text, /round 2\/10/)
@@ -485,4 +485,74 @@ test('fold rejects foreign events by reference within a CPU band', () => {
   samples.sort((a, b) => a - b)
   const median = samples[2]
   assert.ok(median < 500, `foreign fold median ${median.toFixed(1)}ns CPU/op exceeds 500ns band`)
+})
+
+test('resume queues the round a paused turn held back', async () => {
+  // Regression: a completed turn while the loop is paused dropped its round
+  // instead of holding it, and `pause`/`resume` are plugin commands that open
+  // no turn of their own. Nothing was left to drive the loop, so `/loop status`
+  // reported "running at round N" forever while no round ever ran.
+  const registered = []
+  const listeners = []
+  const ctx = {
+    commands: { register: (def) => { registered.push(def); return () => {} } },
+    agents: new Map(),
+    on: (event, fn) => { listeners.push([event, fn]); return () => {} },
+    effect: (fn) => fn(),
+  }
+  apply(ctx)
+  const session = { id: 's10' }
+  const followups = []
+  const agent = { session, whenIdle: () => Promise.resolve(), followup: (m) => followups.push(m) }
+  ctx.agents.set('s10', agent)
+  const turnEnd = { type: 'turn/end', data: { reason: { kind: 'completed' } } }
+  const invoke = (input) => registered[0].handler({ rawInput: input, attachments: [], agent })
+
+  invoke('3 continue')
+  invoke('pause')
+  listeners[0][1](session, turnEnd) // the paused round 1 turn settles: the round is held
+  await settle()
+  assert.equal(followups.length, 1, 'a paused turn queues nothing')
+
+  assert.equal(invoke('resume').text, 'Loop for "continue" resumed at round 1.')
+  await settle()
+  assert.equal(followups.length, 2, 'resume drives the held round with no other turn left to come')
+  assert.match(followups[1].content.at(-1).text, /round 2\/3/)
+  assert.equal(invoke('status').text, 'Loop for "continue" is running — round 2 of 3.')
+})
+
+test('a round queued before unload never lands after the plugin disposes', async () => {
+  // Regression: the deferred round waits for quiescence and the driver kept
+  // its state after the effect disposed, so unloading the row mid-turn still
+  // queued a follow-up into a plugin that was no longer mounted.
+  const registered = []
+  const listeners = []
+  let teardown
+  const ctx = {
+    commands: { register: (def) => { registered.push(def); return () => {} } },
+    agents: new Map(),
+    on: (event, fn) => { listeners.push([event, fn]); return () => {} },
+    effect: (fn) => { teardown = fn() },
+  }
+  apply(ctx)
+  const session = { id: 's11' }
+  const followups = []
+  let release
+  const agent = {
+    session,
+    whenIdle: () => new Promise((resolve) => { release = resolve }),
+    followup: (m) => { followups.push(m) },
+  }
+  ctx.agents.set('s11', agent)
+  const invoke = (input) => registered[0].handler({ rawInput: input, attachments: [], agent })
+
+  invoke('5 continue')
+  assert.equal(followups.length, 1, 'round 1 queues at start')
+  listeners[0][1](session, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  assert.equal(typeof release, 'function', 'round 2 waits for quiescence')
+
+  teardown() // the row is unloaded while round 2 is in flight
+  release() // quiescence arrives after the unload
+  await settle()
+  assert.equal(followups.length, 1, 'an unloaded plugin queues no round')
 })

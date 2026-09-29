@@ -244,7 +244,16 @@ function loopHandler(invocation, state, ctx) {
     if (!loop) return { kind: 'success', text: 'No loop is running.' }
     if (!loop.paused) return { kind: 'success', text: `Loop for "${loop.command}" is already running.` }
     loop.paused = false
-    return { kind: 'success', text: `Loop for "${loop.command}" resumed at round ${loop.run}.` }
+    const text = `Loop for "${loop.command}" resumed at round ${loop.run}.`
+    // The round a paused turn held back has to be queued here: pause and resume
+    // are plugin commands and open no turn, so nothing else would ever drive it.
+    const held = loop.held
+    loop.held = undefined
+    if (held !== undefined) {
+      loop.run = held
+      invocation.agent.followup(userMessage(invocation, roundMessage(loop.command, held, loop.rounds)))
+    }
+    return { kind: 'success', text }
   }
 
   state.loops.set(sessionId, { command: parsed.command, rounds: parsed.rounds, run: 1 })
@@ -281,9 +290,16 @@ export function apply(ctx) {
       const agent = ctx.agents.get(session.id)
       if (!agent || agent.session !== session) return
       const loop = state.loops.get(session.id)
-      if (!loop || loop.paused) return
+      if (!loop) return
       if (loop.rounds !== 0 && loop.run >= loop.rounds) {
         state.loops.delete(session.id)
+        return
+      }
+      // A paused loop holds its round rather than dropping it; `resume` queues
+      // it, because a turn/end is the only other driver and a plugin command
+      // starts no turn.
+      if (loop.paused) {
+        loop.held = loop.run + 1
         return
       }
       loop.run += 1
@@ -293,7 +309,11 @@ export function apply(ctx) {
       // wake delivered before the retiring turn settles never opens a turn.
       // A stop, pause, or restart during the wait re-checks.
       void agent.whenIdle().then(() => {
-        if (state.loops.get(session.id) !== loop || loop.paused) return
+        if (state.loops.get(session.id) !== loop) return
+        if (loop.paused) {
+          loop.held = run
+          return
+        }
         if (ctx.agents.get(session.id) !== agent) return
         agent.followup(userMessage({ attachments: [], agent }, roundMessage(loop.command, run, loop.rounds)))
       }, () => {})
@@ -301,6 +321,10 @@ export function apply(ctx) {
     return () => {
       offTurn?.()
       for (const d of disposers) d()
+      // Drop the driven loops with the plugin: a round still waiting on
+      // quiescence must not queue into an unloaded row, and a remount re-adopts
+      // any live loop from the durable fold anyway.
+      state.loops.clear()
     }
   })
 }
