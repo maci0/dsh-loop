@@ -129,6 +129,15 @@ export const loopProjection = {
   stateSchema: loopProjectionSchema,
   init: () => null,
   apply: (state, event) => {
+    if (event.type === 'turn/end' && event.data?.reason?.kind === 'completed') {
+      // The spent budget is the fold's terminal edge. The driver drops a spent
+      // loop with nothing appended — the round relay is the last canonical row
+      // — so the completed turn/end is the only signal that the pill must
+      // clear; without it the pill stranded on a finished loop while
+      // /loop status answered "No loop is running" beside it.
+      if (state !== null && state.rounds !== 0 && state.run >= state.rounds) return null
+      return state
+    }
     if (event.type === 'command/run' && event.data?.name === 'loop' && typeof event.data?.args === 'string') {
       const parsed = parseArgs(event.data.args)
       if (parsed.kind === 'loop') {
@@ -152,7 +161,7 @@ export const loopProjection = {
     viewSchema: loopProjectionSchema,
     view: state => state,
   },
-  stateVersion: 2,
+  stateVersion: 3,
 }
 
 /**

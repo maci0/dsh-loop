@@ -414,7 +414,36 @@ test('projection unit folds the loop lifecycle without custom events', () => {
   // The wire schema validates the view before it leaves the host.
   assert.deepEqual(loopProjection.wire.viewSchema.parse(round2), round2)
   assert.equal(loopProjection.wire.view(round2), round2)
-  assert.equal(loopProjection.stateVersion, 2)
+  assert.equal(loopProjection.stateVersion, 3, 'the spent-budget fold rule changed the semantics')
+})
+
+test('a finite loop clears the pill when its budget is spent', () => {
+  // Regression: the driver drops a spent loop from memory, but the fold kept
+  // the last round relay's `active` state forever. The pill stranded on a
+  // finished loop and /loop status answered "No loop is running" beside it.
+  const turnEnd = { type: 'turn/end', data: { reason: { kind: 'completed' } } }
+  const relay = (run, rounds) => ({
+    type: 'user/message',
+    data: {
+      source: { kind: 'loop', form: 'relay' },
+      content: [{ type: 'text', text: `[loop round ${run}/${rounds}]\ncontinue` }],
+    },
+  })
+  const started = loopProjection.apply(null, {
+    type: 'command/run', data: { commandId: 'cmd-1', name: 'loop', args: '2 continue', source: { kind: 'user' } },
+  })
+  const lastRound = loopProjection.apply(started, relay(2, 2))
+  assert.deepEqual(lastRound, { phase: 'active', command: 'continue', rounds: 2, run: 2 })
+
+  assert.equal(
+    loopProjection.apply(lastRound, turnEnd),
+    null,
+    'the last round settled: the fold is dead, never re-adopted',
+  )
+
+  // An infinite loop never spends, so its pill stays through every turn.
+  const open = { phase: 'active', command: 'continue', rounds: 0, run: 5 }
+  assert.equal(loopProjection.apply(open, turnEnd), open)
 })
 
 test('round-line parsing rejects garbage', () => {
