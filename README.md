@@ -27,7 +27,7 @@ Pause, Resume, and Stop buttons.
 > row added with `--patch` is an overlay: it disappears at the next start.
 
 ```sh
-dsh plugin --profile web add github:maci0/dsh-loop#v0.8.0
+dsh plugin --profile web add github:maci0/dsh-loop#v0.9.0
 ```
 
 Pin a release tag: a bare `github:` spec floats on `main`. To upgrade, run the
