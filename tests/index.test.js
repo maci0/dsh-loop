@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseArgs, parseRoundLine, budgetLabel, roundMessage, apply, loopProjection } from './index.js'
+import { parseArgs, parseRoundLine, budgetLabel, roundMessage, apply, loopProjection } from '../index.js'
 
 /** Let the driver's deferred round queue, since a round never queues inside the turn/end publication. */
 const settle = () => new Promise((resolve) => setImmediate(resolve))

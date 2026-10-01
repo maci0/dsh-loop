@@ -16,7 +16,7 @@ import test from 'node:test'
 
 import { Context, Service } from '@deepseek-ai/cordis'
 
-import { apply } from './index.js'
+import { apply } from '../index.js'
 
 /** The command seam, tied to the consumer's context the way the registry is. */
 class CommandsSeam extends Service {
