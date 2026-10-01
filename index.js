@@ -123,54 +123,70 @@ const loopViewSchema = z.object({
 }).nullable()
 
 /**
- * Fold state: the view plus the `/loop` invocation whose `command/run` row
- * awaits its `command/done`. The executor appends `command/run` before
- * attachment admission and the handler, so a verb applies only once its
- * paired `command/done` settles as `success`.
+ * Fold state: the view, the `/loop` invocation whose `command/run` row awaits
+ * its `command/done`, whether the turn a round's relay opened is still
+ * running (`inRound`), and the round a pause or an interruption holds back
+ * (`held`). The executor appends `command/run` before attachment admission
+ * and the handler, so a verb applies only once its paired `command/done`
+ * settles as `success`. `inRound` and `held` mirror the driver's memory, so a
+ * remount or restart adopts them.
  */
 const loopStateSchema = z.object({
   loop: loopViewSchema,
   pending: z.object({ commandId: z.string(), args: z.string() }).nullable(),
+  inRound: z.boolean(),
+  held: z.number().int().positive().nullable(),
 })
 
-/** Apply one settled `/loop` invocation's arguments to the view. */
-function applyVerb(loop, args) {
+/** Apply one settled `/loop` invocation's arguments to the fold. */
+function settleVerb(state, args) {
   const parsed = parseArgs(args)
-  if (parsed.kind === 'loop') return { phase: 'active', command: parsed.command, rounds: parsed.rounds, run: 1 }
-  if ((parsed.kind === 'pause' || parsed.kind === 'resume') && loop) {
-    return { ...loop, phase: parsed.kind === 'pause' ? 'paused' : 'active' }
+  const loop = state.loop
+  if (parsed.kind === 'loop') {
+    // Round 1's relay always lands after this row: the agent appends it only
+    // once its turn claims the inbox, past an await.
+    return { loop: { phase: 'active', command: parsed.command, rounds: parsed.rounds, run: 1 }, pending: null, inRound: false, held: null }
   }
-  if (parsed.kind === 'stop') return null
-  return loop
-}
-
-/** The state with a new view, keeping the reference when the view is unchanged. */
-function withLoop(state, loop) {
-  return loop === state.loop ? state : { ...state, loop }
+  if (parsed.kind === 'stop') return { loop: null, pending: null, inRound: false, held: null }
+  if (loop === null) return { ...state, pending: null }
+  if (parsed.kind === 'pause' && loop.phase === 'active') {
+    // Paused between rounds, the driver holds the next round once its wait
+    // for quiescence ends; a relay that still lands replaces this guess.
+    const held = state.inRound ? state.held : loop.run + 1
+    return { ...state, loop: { ...loop, phase: 'paused' }, pending: null, held }
+  }
+  if (parsed.kind === 'resume' && loop.phase === 'paused') {
+    return { ...state, loop: { ...loop, phase: 'active' }, pending: null, held: null }
+  }
+  return { ...state, pending: null }
 }
 
 /**
  * The projection unit: fold the loop's own settled invocations (start, pause,
  * resume, stop; the definition records input, so `command/run` carries the
- * verb verbatim in `args`) and the claimed `user/message` relay lines (round
- * counter advances) into the pill's client view. Registered through
- * `ctx.inject(['sessionProjections'], …)` so headless assemblies without the
- * registry stay unaffected.
+ * verb verbatim in `args`), the claimed `user/message` relay lines (round
+ * counter advances), and the end of each turn a relay opened into the pill's
+ * client view. A turn no relay opened never moves the fold. Registered
+ * through `ctx.inject(['sessionProjections'], …)` so headless assemblies
+ * without the registry stay unaffected.
  */
 export const loopProjection = {
   key: 'loop',
   stateSchema: loopStateSchema,
-  init: () => ({ loop: null, pending: null }),
+  init: () => ({ loop: null, pending: null, inRound: false, held: null }),
   apply: (state, event) => {
-    if (event.type === 'turn/end' && event.data?.reason?.kind === 'completed') {
+    if (event.type === 'turn/end') {
+      if (!state.inRound) return state
+      const loop = state.loop
+      if (event.data?.reason?.kind !== 'completed') {
+        // An interrupted round pauses the loop and holds that same round.
+        return { ...state, inRound: false, loop: { ...loop, phase: 'paused' }, held: loop.run }
+      }
       // The spent budget is the fold's terminal edge. The driver drops a spent
       // loop with nothing appended (the round relay is the last canonical
-      // row), so the completed turn/end is the only signal that the pill must
-      // clear; without it the pill stranded on a finished loop while
-      // /loop status answered "No loop is running" beside it.
-      const loop = state.loop
-      if (loop !== null && loop.rounds !== 0 && loop.run >= loop.rounds) return withLoop(state, null)
-      return state
+      // row), so this turn/end is the only signal that the pill must clear.
+      if (loop.rounds !== 0 && loop.run >= loop.rounds) return { ...state, inRound: false, loop: null, held: null }
+      return { ...state, inRound: false, held: loop.phase === 'paused' ? loop.run + 1 : null }
     }
     if (event.type === 'command/run' && event.data?.name === 'loop'
       && typeof event.data.commandId === 'string' && typeof event.data.args === 'string') {
@@ -179,29 +195,42 @@ export const loopProjection = {
     if (event.type === 'command/done') {
       const pending = state.pending
       if (pending === null || event.data?.commandId !== pending.commandId) return state
-      const loop = event.data.kind === 'success' ? applyVerb(state.loop, pending.args) : state.loop
-      return { loop, pending: null }
+      return event.data.kind === 'success' ? settleVerb(state, pending.args) : { ...state, pending: null }
     }
     if (!isLoopRelay(event)) return state
     const blocks = Array.isArray(event.data?.content) ? event.data.content : []
     const text = blocks.filter((block) => block?.type === 'text').map((block) => block.text).join('')
     const round = parseRoundLine(text)
     if (!round) return state
-    return withLoop(state, { phase: 'active', command: round.command, rounds: round.rounds, run: round.run })
+    // A relay queued before a pause still runs; the loop stays paused.
+    const phase = state.loop?.phase === 'paused' ? 'paused' : 'active'
+    return { ...state, inRound: true, held: null, loop: { phase, command: round.command, rounds: round.rounds, run: round.run } }
   },
   wire: {
     viewSchema: loopViewSchema,
     view: state => state.loop,
   },
-  stateVersion: 4,
+  stateVersion: 5,
 }
 
-/** One round's queued user message, tagged so the fold can claim it. */
-function userMessage(invocation, text) {
-  return createUserMessage({
-    content: [...invocation.attachments, { type: 'text', text }],
+/**
+ * Queue one round as the agent's next turn. The relay's message id is how the
+ * driver recognizes the turn that round opened: only that turn's end moves
+ * the loop, never a turn the user or another plugin opened.
+ * @param {object} agent - the session's agent.
+ * @param {object} loop - the driven loop.
+ * @param {number} run - the round to queue.
+ * @param {readonly object[]} attachments - blocks to send with the round.
+ */
+function queueRound(agent, loop, run, attachments) {
+  const message = createUserMessage({
+    content: [...attachments, { type: 'text', text: roundMessage(loop.command, run, loop.rounds) }],
     source: { kind: 'loop', form: 'relay' },
   })
+  loop.run = run
+  loop.relayId = message.id
+  loop.turnOpen = false
+  agent.followup(message)
 }
 
 /**
@@ -214,7 +243,7 @@ function userMessage(invocation, text) {
 function readProjectedLoop(ctx, session) {
   try {
     const projected = ctx.get?.('sessionProjections')?.stateOf?.(session, 'loop')
-    return projected?.loop ?? undefined
+    return projected?.loop ? projected : undefined
   } catch {
     // A fold that cannot materialize (a gap in the log) leaves the verbs on
     // the live map alone, the same answer as a host without the registry.
@@ -224,19 +253,22 @@ function readProjectedLoop(ctx, session) {
 
 /**
  * The loop for one session: the live map entry, or the durable view adopted
- * back into the map when the process forgot it (restart, remount). A null
- * view (stopped or spent) stays dead.
+ * back into the map when the process forgot it (restart, remount), with the
+ * round turn in flight and the held round. A null view (stopped or spent)
+ * stays dead.
  */
 function liveLoop(ctx, state, session) {
   const loop = state.loops.get(session.id)
   if (loop) return loop
-  const projected = readProjectedLoop(ctx, session)
-  if (!projected) return undefined
+  const fold = readProjectedLoop(ctx, session)
+  if (!fold) return undefined
   const adopted = {
-    command: projected.command,
-    rounds: projected.rounds,
-    run: projected.run,
-    paused: projected.phase === 'paused',
+    command: fold.loop.command,
+    rounds: fold.loop.rounds,
+    run: fold.loop.run,
+    paused: fold.loop.phase === 'paused',
+    held: fold.held ?? undefined,
+    turnOpen: fold.inRound === true,
   }
   state.loops.set(session.id, adopted)
   return adopted
@@ -275,19 +307,18 @@ function loopHandler(invocation, state, ctx) {
     if (!loop.paused) return { kind: 'success', text: `Loop for "${loop.command}" is already running.` }
     loop.paused = false
     const text = `Loop for "${loop.command}" resumed at round ${loop.run}.`
-    // The round a paused turn held back has to be queued here: pause and resume
-    // are plugin commands and open no turn, so nothing else would ever drive it.
+    // The round a paused or interrupted turn held back has to be queued here:
+    // pause and resume are plugin commands and open no turn, so nothing else
+    // would ever drive it.
     const held = loop.held
     loop.held = undefined
-    if (held !== undefined) {
-      loop.run = held
-      invocation.agent.followup(userMessage(invocation, roundMessage(loop.command, held, loop.rounds)))
-    }
+    if (held !== undefined) queueRound(invocation.agent, loop, held, invocation.attachments)
     return { kind: 'success', text }
   }
 
-  state.loops.set(sessionId, { command: parsed.command, rounds: parsed.rounds, run: 1 })
-  invocation.agent.followup(userMessage(invocation, roundMessage(parsed.command, 1, parsed.rounds)))
+  const loop = { command: parsed.command, rounds: parsed.rounds, run: 1 }
+  state.loops.set(sessionId, loop)
+  queueRound(invocation.agent, loop, 1, invocation.attachments)
   return {
     kind: 'success',
     text: `Loop started: "${parsed.command}" for ${budgetLabel(parsed.rounds)} round(s).`,
@@ -313,16 +344,29 @@ export function apply(ctx) {
       input: { hint: '<rounds> <command> | pause | resume | stop | status', attachments: true },
       handler: (inv) => loopHandler(inv, state, ctx),
     }))
-    // After each completed turn, queue the next round until the budget spends.
-    // A paused loop holds its round: the completed turn settles with nothing
-    // queued, and resume picks up exactly where it left off. The pill follows
-    // the claimed `user/message` relay lines, so the driver appends nothing.
+    // After the turn a round opened completes, queue the next round until the
+    // budget spends. A turn the round did not open (one already running when
+    // /loop was typed, one the user opened between rounds) never moves the
+    // loop. A round turn that ends any other way (aborted, error, blocked,
+    // max-tokens, interrupted by a restart) pauses the loop and holds that same
+    // round for resume. A paused loop holds its next round: the completed turn
+    // settles with nothing queued, and resume picks up exactly where it left
+    // off. The pill follows the same rows, so the driver appends nothing.
     const offTurn = ctx.on('session/event', (session, event) => {
-      if (event?.type !== 'turn/end' || event?.data?.reason?.kind !== 'completed') return
-      const agent = ctx.agents.get(session.id)
-      if (!agent || agent.session !== session) return
       const loop = state.loops.get(session.id)
       if (!loop) return
+      if (event?.type === 'user/message') {
+        if (event.data?.source?.kind === 'loop' && event.data.id === loop.relayId) loop.turnOpen = true
+        return
+      }
+      if (event?.type !== 'turn/end' || !loop.turnOpen) return
+      loop.turnOpen = false
+      loop.relayId = undefined
+      if (event.data?.reason?.kind !== 'completed') {
+        loop.paused = true
+        loop.held = loop.run
+        return
+      }
       if (loop.rounds !== 0 && loop.run >= loop.rounds) {
         state.loops.delete(session.id)
         return
@@ -334,8 +378,10 @@ export function apply(ctx) {
         loop.held = loop.run + 1
         return
       }
-      loop.run += 1
-      const run = loop.run
+      const agent = ctx.agents.get(session.id)
+      if (!agent || agent.session !== session) return
+      const run = loop.run + 1
+      loop.run = run
       // The round waits for quiescence: `followup` appends, and a session
       // refuses an append that reenters the event being published, while a
       // wake delivered before the retiring turn settles never opens a turn.
@@ -347,7 +393,7 @@ export function apply(ctx) {
           return
         }
         if (ctx.agents.get(session.id) !== agent) return
-        agent.followup(userMessage({ attachments: [], agent }, roundMessage(loop.command, run, loop.rounds)))
+        queueRound(agent, loop, run, [])
       }, () => {})
     })
     return () => {

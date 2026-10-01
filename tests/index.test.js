@@ -11,12 +11,18 @@ const loopRun = (commandId, args) => ({
 })
 const loopDone = (commandId, kind) => ({ type: 'command/done', data: { commandId, kind, text: 'x' } })
 
+/** End the turn a round's relay opened: the relay lands, then its turn/end. */
+const endRound = (listener, session, message, kind = 'completed') => {
+  listener(session, { type: 'user/message', data: message })
+  listener(session, { type: 'turn/end', data: { reason: { kind } } })
+}
+
 /** Fold one `/loop <args>` invocation that settled as `success`. */
 const settled = (state, commandId, args) =>
   loopProjection.apply(loopProjection.apply(state, loopRun(commandId, args)), loopDone(commandId, 'success'))
 
-/** The fold state for a given pill view. */
-const foldOf = (loop) => ({ loop, pending: null })
+/** The fold state for a given pill view, with no round turn open or held. */
+const foldOf = (loop) => ({ loop, pending: null, inRound: false, held: null })
 
 test('parseArgs reads the documented forms', () => {
   assert.deepEqual(parseArgs('10 /perf-review'), { kind: 'loop', rounds: 10, command: '/perf-review' })
@@ -131,16 +137,16 @@ test('apply registers /loop and drives rounds on turn/end', async () => {
   assert.match(followups[0].content.at(-1).text, /round 1\/2/)
 
   // Round 1 completes → round 2 queues.
-  listeners[0][1](session, turnEnd)
+  endRound(listeners[0][1], session, followups.at(-1))
   await settle()
   assert.equal(followups.length, 2)
   assert.match(followups[1].content.at(-1).text, /round 2\/2/)
 
   // Round 2 completes → budget spent, nothing more queues.
-  listeners[0][1](session, turnEnd)
+  endRound(listeners[0][1], session, followups.at(-1))
   await settle()
   assert.equal(followups.length, 2)
-  listeners[0][1](session, turnEnd)
+  endRound(listeners[0][1], session, followups.at(-1))
   await settle()
   assert.equal(followups.length, 2)
 })
@@ -164,12 +170,15 @@ test('infinite loop keeps queueing until /loop stop', async () => {
 
   assert.match(invoke('0 /perf-review').text, /∞/)
   assert.equal(followups.length, 1)
-  for (let i = 0; i < 3; i++) listeners[0][1](session, turnEnd)
+  for (let i = 0; i < 3; i++) {
+    endRound(listeners[0][1], session, followups.at(-1))
+    await settle()
+  }
   await settle()
   assert.equal(followups.length, 4, 'every completed turn queues the next round')
 
   assert.match(invoke('stop').text, /stopped after 4 round/)
-  listeners[0][1](session, turnEnd)
+  endRound(listeners[0][1], session, followups.at(-1))
   await settle()
   assert.equal(followups.length, 4, 'stopped loop queues nothing')
 
@@ -201,7 +210,7 @@ test('/loop status reports the live loop, and nothing when there is none', async
     'Loop for "/perf-review" is running at round 1 of 4.',
   )
 
-  listeners[0][1](session, turnEnd)
+  endRound(listeners[0][1], session, followups.at(-1))
   await settle()
   assert.equal(invoke('status').text, 'Loop for "/perf-review" is running at round 2 of 4.')
 
@@ -286,7 +295,7 @@ test('pause holds the round, resume continues it', async () => {
   invoke('3 continue')
   assert.equal(invoke('pause').text, 'Loop for "continue" paused at round 1.')
   assert.equal(invoke('pause').text, 'Loop for "continue" is already paused at round 1.')
-  listeners[0][1](session, turnEnd)
+  endRound(listeners[0][1], session, followups.at(-1))
   await settle()
   assert.equal(followups.length, 1, 'a completed turn while paused queues nothing')
 
@@ -331,6 +340,8 @@ test('a round never queues inside the turn/end publication', async () => {
   registered[0].handler({ rawInput: '2 continue', attachments: [], agent })
   assert.equal(followups.length, 1)
 
+
+  listeners[0][1](session, { type: 'user/message', data: followups[0] })
   publishing = true
   listeners[0][1](session, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
   publishing = false
@@ -369,7 +380,7 @@ test('verbs adopt the durable fold after the process forgets the loop', async ()
     on: (event, fn) => { listeners.push([event, fn]); return () => {} },
     effect: (fn) => fn(),
     get: (key) => key === 'sessionProjections'
-      ? { stateOf: () => foldOf(projected.phase === 'dead' ? null : { ...projected }) }
+      ? { stateOf: () => ({ ...foldOf(projected.phase === 'dead' ? null : { ...projected }), inRound: true }) }
       : undefined,
   }
   apply(ctx)
@@ -462,7 +473,7 @@ test('projection unit folds the loop lifecycle without custom events', () => {
   assert.deepEqual(loopProjection.wire.viewSchema.parse(view(round2)), view(round2))
   assert.deepEqual(loopProjection.stateSchema.parse(running), running)
   assert.equal(view(round2), round2.loop)
-  assert.equal(loopProjection.stateVersion, 4, 'the fold state gained the pending invocation')
+  assert.equal(loopProjection.stateVersion, 5, 'the fold state gained the round turn and the held round')
 })
 
 test('a /loop that settles as an error never moves the pill', () => {
@@ -593,7 +604,7 @@ test('resume queues the round a paused turn held back', async () => {
 
   invoke('3 continue')
   invoke('pause')
-  listeners[0][1](session, turnEnd) // the paused round 1 turn settles: the round is held
+  endRound(listeners[0][1], session, followups.at(-1)) // the paused round 1 turn settles: the round is held
   await settle()
   assert.equal(followups.length, 1, 'a paused turn queues nothing')
 
@@ -631,6 +642,7 @@ test('a round queued before unload never lands after the plugin disposes', async
 
   invoke('5 continue')
   assert.equal(followups.length, 1, 'round 1 queues at start')
+  listeners[0][1](session, { type: 'user/message', data: followups[0] })
   listeners[0][1](session, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
   assert.equal(typeof release, 'function', 'round 2 waits for quiescence')
 
@@ -638,4 +650,125 @@ test('a round queued before unload never lands after the plugin disposes', async
   release() // quiescence arrives after the unload
   await settle()
   assert.equal(followups.length, 1, 'an unloaded plugin queues no round')
+})
+
+/** A driver over fakes: the registered handler, the turn listener, and the queued rounds. */
+function mountDriver(sessionId, projections) {
+  const registered = []
+  const listeners = []
+  const ctx = {
+    commands: { register: (def) => { registered.push(def); return () => {} } },
+    agents: new Map(),
+    on: (event, fn) => { listeners.push([event, fn]); return () => {} },
+    effect: (fn) => fn(),
+    ...(projections === undefined ? {} : { get: (key) => (key === 'sessionProjections' ? projections : undefined) }),
+  }
+  apply(ctx)
+  const session = { id: sessionId }
+  const followups = []
+  const agent = { session, whenIdle: () => Promise.resolve(), followup: (m) => followups.push(m) }
+  ctx.agents.set(sessionId, agent)
+  const emit = (event) => listeners[0][1](session, event)
+  return {
+    followups,
+    invoke: (input) => registered[0].handler({ rawInput: input, attachments: [], agent }),
+    /** The agent opens a turn for a message and ends it with `kind`. */
+    turn: async (message, kind = 'completed') => {
+      emit({ type: 'turn/start', data: { turn: 1 } })
+      emit({ type: 'user/message', data: message })
+      emit({ type: 'turn/end', data: { turn: 1, reason: { kind } } })
+      await settle()
+    },
+    /** A turn the loop did not open, ending with `kind`. */
+    foreignTurn: async (kind = 'completed') => {
+      emit({ type: 'turn/start', data: { turn: 1 } })
+      emit({ type: 'user/message', data: { id: 'typed', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] } })
+      emit({ type: 'turn/end', data: { turn: 1, reason: { kind } } })
+      await settle()
+    },
+  }
+}
+
+test('only the turn a round opened advances the loop', async () => {
+  // Regression: every completed turn advanced the round, so a turn already
+  // running when /loop was typed counted as round 1, and a turn the user
+  // opened between rounds counted as a round too.
+  const driver = mountDriver('s20')
+  driver.invoke('2 continue')
+  assert.equal(driver.followups.length, 1)
+
+  await driver.foreignTurn() // the turn that was running when /loop was typed
+  assert.equal(driver.followups.length, 1, 'a turn the loop did not open is not a round')
+  assert.equal(driver.invoke('status').text, 'Loop for "continue" is running at round 1 of 2.')
+
+  await driver.turn(driver.followups[0])
+  assert.equal(driver.followups.length, 2)
+  assert.match(driver.followups[1].content.at(-1).text, /round 2\/2/)
+
+  await driver.foreignTurn()
+  assert.equal(driver.invoke('status').text, 'Loop for "continue" is running at round 2 of 2.')
+  await driver.turn(driver.followups[1])
+  assert.equal(driver.invoke('status').text, 'No loop is running.', 'the budget is spent by its own rounds')
+})
+
+test('an interrupted round pauses the loop, and resume runs it again', async () => {
+  const driver = mountDriver('s21')
+  driver.invoke('3 continue')
+  for (const kind of ['aborted', 'error', 'interrupted']) {
+    const round = driver.followups.at(-1)
+    await driver.turn(round, kind)
+    assert.equal(driver.invoke('status').text, 'Loop for "continue" is paused at round 1 of 3.', `${kind} pauses`)
+    assert.equal(driver.invoke('resume').text, 'Loop for "continue" resumed at round 1.')
+    assert.match(driver.followups.at(-1).content.at(-1).text, /round 1\/3/, `${kind}: the interrupted round runs again`)
+  }
+  await driver.turn(driver.followups.at(-1))
+  assert.match(driver.followups.at(-1).content.at(-1).text, /round 2\/3/)
+})
+
+test('the fold follows only the turns its rounds opened', () => {
+  const view = (state) => loopProjection.wire.view(state)
+  const turnEnd = (kind) => ({ type: 'turn/end', data: { turn: 1, reason: { kind } } })
+  const relay = (run, rounds) => ({
+    type: 'user/message',
+    data: { id: `r${run}`, source: { kind: 'loop', form: 'relay' }, content: [{ type: 'text', text: `[loop round ${run}/${rounds}]\ncontinue` }] },
+  })
+
+  // `/loop 1 continue` typed while another turn runs: that turn's end must
+  // not spend the budget and clear the pill.
+  const started = settled(loopProjection.init({}, 0), 'c1', '1 continue')
+  const afterForeign = loopProjection.apply(started, turnEnd('completed'))
+  assert.deepEqual(view(afterForeign), { phase: 'active', command: 'continue', rounds: 1, run: 1 })
+  assert.equal(view(loopProjection.apply(loopProjection.apply(afterForeign, relay(1, 1)), turnEnd('completed'))), null)
+
+  // An interrupted round pauses the pill and holds that same round.
+  const three = settled(loopProjection.init({}, 0), 'c2', '3 continue')
+  const interrupted = loopProjection.apply(loopProjection.apply(three, relay(1, 3)), turnEnd('aborted'))
+  assert.deepEqual(view(interrupted), { phase: 'paused', command: 'continue', rounds: 3, run: 1 })
+  assert.equal(interrupted.held, 1)
+  const resumed = settled(interrupted, 'c3', 'resume')
+  assert.equal(view(resumed).phase, 'active')
+  assert.equal(resumed.held, null)
+
+  // Paused mid-round: the completed round holds the next one.
+  const paused = settled(loopProjection.apply(three, relay(1, 3)), 'c4', 'pause')
+  const held = loopProjection.apply(paused, turnEnd('completed'))
+  assert.equal(view(held).phase, 'paused')
+  assert.equal(held.held, 2)
+})
+
+test('a remount adopts the round in flight and the round a pause held', async () => {
+  // The fold carries what the driver's memory held: whether a round's turn is
+  // open, and which round a pause or an interruption holds back.
+  const fold = { loop: { phase: 'active', command: 'continue', rounds: 3, run: 1 }, pending: null, inRound: true, held: null }
+  const live = mountDriver('s22', { stateOf: () => fold })
+  assert.equal(live.invoke('status').text, 'Loop for "continue" is running at round 1 of 3.')
+  await live.turn({ id: 'from-before-the-remount', source: { kind: 'loop' } })
+  assert.equal(live.followups.length, 1, 'the adopted round in flight still drives the next one')
+  assert.match(live.followups[0].content.at(-1).text, /round 2\/3/)
+
+  const parked = { loop: { phase: 'paused', command: 'continue', rounds: 3, run: 2 }, pending: null, inRound: false, held: 2 }
+  const restarted = mountDriver('s23', { stateOf: () => parked })
+  assert.equal(restarted.invoke('resume').text, 'Loop for "continue" resumed at round 2.')
+  assert.equal(restarted.followups.length, 1, 'resume runs the held round after a restart')
+  assert.match(restarted.followups[0].content.at(-1).text, /round 2\/3/)
 })
