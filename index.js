@@ -27,13 +27,14 @@ export const inject = ['commands', 'agents']
 
 /**
  * Parse `/loop` arguments: `<rounds> <command>`, or `pause` / `resume` /
- * `stop`. The command is free text passed verbatim to the agent each round,
- * so slash-command chains such as `/perf-review && /cordis-review` replay as
- * written. There is one deliberate restriction: a nested `/loop stop` would
- * end the loop from inside its own replay and leave the loop with no way to
- * stop, so it is rejected before the loop starts.
+ * `stop` / `status` (`list` is an alias). The command is free text passed
+ * verbatim to the agent each round, so slash-command chains such as
+ * `/perf-review && /cordis-review` replay as written. There is one deliberate
+ * restriction: a nested `/loop stop` would end the loop from inside its own
+ * replay and leave the loop with no way to stop, so it is rejected before the
+ * loop starts.
  * @param {string} input - raw text after `/loop`.
- * @returns {{ kind: 'pause' } | { kind: 'resume' } | { kind: 'stop' } |
+ * @returns {{ kind: 'pause' } | { kind: 'resume' } | { kind: 'stop' } | { kind: 'status' } |
  *            { kind: 'error', text: string } |
  *            { kind: 'loop', rounds: number, command: string }}
  *   `rounds` is the total round budget; 0 means infinite.
