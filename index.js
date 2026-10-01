@@ -1,5 +1,5 @@
 /**
- * dsh-loop — repeat a command on a cadence of agent turns.
+ * dsh-loop: repeat a command on a cadence of agent turns.
  *
  * `/loop <rounds> <command>` queues the command as the agent's next turn and,
  * after each completed turn, queues the next round until the budget is spent.
@@ -14,8 +14,8 @@
  *   /loop resume
  *   /loop stop
  *
- * Load via a row in ~/.dsh/profiles/<profile>/cordis.patch.yml, or
- * `--patch cordis.local.yml`.
+ * Install with `dsh plugin --profile <name> add github:maci0/dsh-loop#<tag>`.
+ * For local development, `dsh plugin --profile <name> add <path-to-checkout>`.
  */
 import { z } from 'zod'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
@@ -26,7 +26,7 @@ export const name = 'loop'
 export const inject = ['commands', 'agents']
 
 /**
- * Parse `/loop` arguments: `<rounds> <command...>`, or `pause` / `resume` /
+ * Parse `/loop` arguments: `<rounds> <command>`, or `pause` / `resume` /
  * `stop`. The command is free text passed verbatim to the agent each round,
  * so slash-command chains such as `/perf-review && /cordis-review` replay as
  * written. There is one deliberate restriction: a nested `/loop stop` would
@@ -51,7 +51,7 @@ export function parseArgs(input) {
   if (!match) {
     return {
       kind: 'error',
-      text: 'Usage: /loop <rounds> <command> — e.g. /loop 10 /perf-review, /loop 10 /perf-review && /cordis-review, /loop 0 continue (0 = forever). Or /loop pause | resume | stop | status.',
+      text: 'Usage: /loop <rounds> <command>, for example /loop 10 /perf-review, /loop 10 /perf-review && /cordis-review, /loop 0 continue (0 = forever). Or /loop pause | resume | stop | status.',
     }
   }
   const command = match[2].trim()
@@ -80,7 +80,7 @@ export function roundMessage(command, run, rounds) {
   return `[loop round ${run}/${budgetLabel(rounds)}]\n${command}`
 }
 
-// --- projection: the /loop pill's live state ---
+// Projection: the /loop pill's live state.
 //
 // The pill folds only events the harness already understands (the loop's own
 // `command/run` and `command/done` rows, and the `user/message` relay lines
@@ -258,7 +258,7 @@ function loopHandler(invocation, state, ctx) {
     const state_ = loop.paused ? 'paused' : 'running'
     return {
       kind: 'success',
-      text: `Loop for "${loop.command}" is ${state_} — round ${loop.run} of ${budgetLabel(loop.rounds)}.`,
+      text: `Loop for "${loop.command}" is ${state_} at round ${loop.run} of ${budgetLabel(loop.rounds)}.`,
     }
   }
   if (parsed.kind === 'pause') {

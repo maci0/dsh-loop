@@ -1,7 +1,0 @@
-# /loop for DeepSeek Harness.
-# Local-dev overlay: absolute path (per first-plugin tutorial). For the
-# profile install run `dsh plugin --profile <name> add <this dir>`; the
-# package declares dsh.bundle, so cordis.patch.yml ships as a layer.
-- insert:
-    - id: loop
-      name: '/home/maci/dsh-plugins/dsh-loop/index.js'
