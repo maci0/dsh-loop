@@ -82,14 +82,14 @@ export function roundMessage(command, run, rounds) {
 
 // --- projection: the /loop pill's live state ---
 //
-// The pill folds only events the harness already understands — `command/run`
-// (the loop's own lifecycle row) and the `user/message` relay lines the
-// driver queues each round — so the plugin never appends a custom event
-// type. A custom `loop/state` type would poison the log: the persistence
-// read path refuses any session containing an unknown non-ignorable type,
-// and the envelope marker cannot be attached through `Session.append`.
-// Out-of-repo plugins cannot extend the known-type catalog, so the durable
-// fold reads only canonical history.
+// The pill folds only events the harness already understands (the loop's own
+// `command/run` and `command/done` rows, and the `user/message` relay lines
+// the driver queues each round), so the plugin never appends a custom event
+// type. A custom type would poison the log: the persistence read path refuses
+// any session containing an unknown non-ignorable type, and the envelope
+// marker cannot be attached through `Session.append`. Out-of-repo plugins
+// cannot extend the known-type catalog, so the durable fold reads only
+// canonical history.
 
 /**
  * Parse one round relay line back into its loop fields. Returns `undefined`
@@ -111,68 +111,89 @@ function isLoopRelay(event) {
     && event.data?.source?.kind === 'loop'
 }
 
-const loopStateSchema = z.object({
+/** The pill's client view: the running or paused loop, or null for none. */
+const loopViewSchema = z.object({
   phase: z.enum(['active', 'paused']),
   command: z.string().min(1),
   rounds: z.number().int().nonnegative(),
   run: z.number().int().positive(),
-})
-
-const loopProjectionSchema = loopStateSchema.nullable()
+}).nullable()
 
 /**
- * The projection unit: fold the loop's own `command/run` rows (start, pause,
- * resume, stop — the definition records input, so `args` carries the verb
- * verbatim) and the claimed `user/message` relay lines (round counter
- * advances) into the pill's client view. A claimed stop/pause/resume
- * `command/done` row clears or freezes the pill without any custom event.
- * Registered through `ctx.inject(['sessionProjections'], …)` so headless
- * assemblies without the registry stay unaffected.
+ * Fold state: the view plus the `/loop` invocation whose `command/run` row
+ * awaits its `command/done`. The executor appends `command/run` before
+ * attachment admission and the handler, so a verb applies only once its
+ * paired `command/done` settles as `success`.
+ */
+const loopStateSchema = z.object({
+  loop: loopViewSchema,
+  pending: z.object({ commandId: z.string(), args: z.string() }).nullable(),
+})
+
+/** Apply one settled `/loop` invocation's arguments to the view. */
+function applyVerb(loop, args) {
+  const parsed = parseArgs(args)
+  if (parsed.kind === 'loop') return { phase: 'active', command: parsed.command, rounds: parsed.rounds, run: 1 }
+  if ((parsed.kind === 'pause' || parsed.kind === 'resume') && loop) {
+    return { ...loop, phase: parsed.kind === 'pause' ? 'paused' : 'active' }
+  }
+  if (parsed.kind === 'stop') return null
+  return loop
+}
+
+/** The state with a new view, keeping the reference when the view is unchanged. */
+function withLoop(state, loop) {
+  return loop === state.loop ? state : { ...state, loop }
+}
+
+/**
+ * The projection unit: fold the loop's own settled invocations (start, pause,
+ * resume, stop; the definition records input, so `command/run` carries the
+ * verb verbatim in `args`) and the claimed `user/message` relay lines (round
+ * counter advances) into the pill's client view. Registered through
+ * `ctx.inject(['sessionProjections'], …)` so headless assemblies without the
+ * registry stay unaffected.
  */
 export const loopProjection = {
   key: 'loop',
-  stateSchema: loopProjectionSchema,
-  init: () => null,
+  stateSchema: loopStateSchema,
+  init: () => ({ loop: null, pending: null }),
   apply: (state, event) => {
     if (event.type === 'turn/end' && event.data?.reason?.kind === 'completed') {
       // The spent budget is the fold's terminal edge. The driver drops a spent
-      // loop with nothing appended — the round relay is the last canonical row
-      // — so the completed turn/end is the only signal that the pill must
+      // loop with nothing appended (the round relay is the last canonical
+      // row), so the completed turn/end is the only signal that the pill must
       // clear; without it the pill stranded on a finished loop while
       // /loop status answered "No loop is running" beside it.
-      if (state !== null && state.rounds !== 0 && state.run >= state.rounds) return null
+      const loop = state.loop
+      if (loop !== null && loop.rounds !== 0 && loop.run >= loop.rounds) return withLoop(state, null)
       return state
     }
-    if (event.type === 'command/run' && event.data?.name === 'loop' && typeof event.data?.args === 'string') {
-      const parsed = parseArgs(event.data.args)
-      if (parsed.kind === 'loop') {
-        return { phase: 'active', command: parsed.command, rounds: parsed.rounds, run: 1 }
-      }
-      if ((parsed.kind === 'pause' || parsed.kind === 'resume') && state) {
-        return { ...state, phase: parsed.kind === 'pause' ? 'paused' : 'active' }
-      }
-      if (parsed.kind === 'stop') return null
-      return state
+    if (event.type === 'command/run' && event.data?.name === 'loop'
+      && typeof event.data.commandId === 'string' && typeof event.data.args === 'string') {
+      return { ...state, pending: { commandId: event.data.commandId, args: event.data.args } }
     }
-    if (event.type === 'command/done' && event.data?.name === 'loop') return state
+    if (event.type === 'command/done') {
+      const pending = state.pending
+      if (pending === null || event.data?.commandId !== pending.commandId) return state
+      const loop = event.data.kind === 'success' ? applyVerb(state.loop, pending.args) : state.loop
+      return { loop, pending: null }
+    }
     if (!isLoopRelay(event)) return state
     const blocks = Array.isArray(event.data?.content) ? event.data.content : []
     const text = blocks.filter((block) => block?.type === 'text').map((block) => block.text).join('')
     const round = parseRoundLine(text)
     if (!round) return state
-    return { phase: 'active', command: round.command, rounds: round.rounds, run: round.run }
+    return withLoop(state, { phase: 'active', command: round.command, rounds: round.rounds, run: round.run })
   },
   wire: {
-    viewSchema: loopProjectionSchema,
-    view: state => state,
+    viewSchema: loopViewSchema,
+    view: state => state.loop,
   },
-  stateVersion: 3,
+  stateVersion: 4,
 }
 
-/**
- * Per-instance plugin state. Module-level state would outlive plugin unload
- * and leak across instances, so every apply() builds its own.
- */
+/** One round's queued user message, tagged so the fold can claim it. */
 function userMessage(invocation, text) {
   return createUserMessage({
     content: [...invocation.attachments, { type: 'text', text }],
@@ -181,32 +202,33 @@ function userMessage(invocation, text) {
 }
 
 /**
- * Read the durable loop fold for one session. The round driver's `loops` map
- * is process memory and dies on restart; the `loop/state` log plus the
- * projection unit survive. Without this fallback, a restart leaves the pill
- * showing an active loop the verbs cannot see — `/loop stop` answers "No
- * loop is running" while the pill never clears.
+ * Read the durable loop view for one session. The round driver's `loops` map
+ * is process memory and dies on restart; the session log and the projection
+ * unit folding it survive. Without this fallback, a restart leaves the pill
+ * showing an active loop the verbs cannot see: `/loop stop` answers "No loop
+ * is running" while the pill never clears.
  */
 function readProjectedLoop(ctx, session) {
   try {
     const projected = ctx.get?.('sessionProjections')?.stateOf?.(session, 'loop')
-    if (!projected || typeof projected !== 'object') return undefined
-    return projected
+    return projected?.loop ?? undefined
   } catch {
+    // A fold that cannot materialize (a gap in the log) leaves the verbs on
+    // the live map alone, the same answer as a host without the registry.
     return undefined
   }
 }
 
 /**
- * The loop for one session: the live map entry, or the durable fold adopted
- * back into the map when the process forgot it (restart, remount). Only an
- * `active` or `paused` fold adopts — `stopped` and `done` stay dead.
+ * The loop for one session: the live map entry, or the durable view adopted
+ * back into the map when the process forgot it (restart, remount). A null
+ * view (stopped or spent) stays dead.
  */
 function liveLoop(ctx, state, session) {
   const loop = state.loops.get(session.id)
   if (loop) return loop
   const projected = readProjectedLoop(ctx, session)
-  if (!projected || (projected.phase !== 'active' && projected.phase !== 'paused')) return undefined
+  if (!projected) return undefined
   const adopted = {
     command: projected.command,
     rounds: projected.rounds,
@@ -270,6 +292,8 @@ function loopHandler(invocation, state, ctx) {
 }
 
 export function apply(ctx) {
+  // Per-instance driver state: module-level state would outlive an unload and
+  // leak across instances.
   const state = { loops: new Map() }
 
   // Serve the pill's live loop state when the projection registry is mounted.
