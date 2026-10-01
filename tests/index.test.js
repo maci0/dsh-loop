@@ -526,6 +526,15 @@ test('round-line parsing rejects garbage', () => {
   assert.deepEqual(parseRoundLine('[loop round 4/∞ (stop with /loop stop)]\n/perf-review'), {
     run: 4, rounds: 0, command: '/perf-review',
   })
+  // Session logs are durable, so the infinite budget reads by its glyph, not
+  // the exact label text a release happened to write.
+  assert.deepEqual(parseRoundLine(`${roundMessage('/perf-review', 4, 0)}`), {
+    run: 4, rounds: 0, command: '/perf-review',
+  })
+  assert.deepEqual(parseRoundLine('[loop round 4/∞]\n/perf-review'), {
+    run: 4, rounds: 0, command: '/perf-review',
+  })
+  assert.equal(parseRoundLine('[loop round 4/∞x]\n/perf-review'), undefined)
 })
 
 test('fold rejects foreign events by reference within a CPU band', () => {

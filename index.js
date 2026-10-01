@@ -99,7 +99,9 @@ export function parseRoundLine(text) {
   const match = /^\[loop round (\d+)\/(.+?)\]\n([\s\S]+)$/.exec(text)
   if (!match) return undefined
   const run = Number(match[1])
-  const budget = match[2] === '∞ (stop with /loop stop)' ? 0 : Number(match[2])
+  // The infinite budget reads by its leading glyph: the label after it is
+  // display text, and logs written by older releases must keep folding.
+  const budget = /^∞(?: .*)?$/.test(match[2]) ? 0 : Number(match[2])
   const command = match[3].trim()
   if (!Number.isSafeInteger(run) || run < 1 || !Number.isSafeInteger(budget) || budget < 0 || command === '') return undefined
   return { run, rounds: budget, command }
