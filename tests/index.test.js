@@ -198,15 +198,15 @@ test('/loop status reports the live loop, and nothing when there is none', async
   invoke('4 /perf-review')
   assert.equal(
     invoke('status').text,
-    'Loop for "/perf-review" is running — round 1 of 4.',
+    'Loop for "/perf-review" is running at round 1 of 4.',
   )
 
   listeners[0][1](session, turnEnd)
   await settle()
-  assert.equal(invoke('status').text, 'Loop for "/perf-review" is running — round 2 of 4.')
+  assert.equal(invoke('status').text, 'Loop for "/perf-review" is running at round 2 of 4.')
 
   invoke('pause')
-  assert.equal(invoke('status').text, 'Loop for "/perf-review" is paused — round 2 of 4.')
+  assert.equal(invoke('status').text, 'Loop for "/perf-review" is paused at round 2 of 4.')
 
   invoke('stop')
   assert.equal(invoke('status').text, 'No loop is running.')
@@ -235,7 +235,7 @@ test('non-completed turns and foreign sessions do not advance the loop', () => {
 })
 
 test('the driver appends no custom events', async () => {
-  // Regression: a plugin-owned `loop/state` type poisons the log — the
+  // Regression: a plugin-owned `loop/state` type poisons the log: the
   // persistence read path refuses sessions with unknown non-ignorable types.
   // The driver must queue rounds without appending anything itself.
   const registered = []
@@ -541,7 +541,7 @@ test('fold rejects foreign events by reference within a CPU band', () => {
   // Deterministic perf gate: the fold runs on EVERY committed session event,
   // so foreign events must cost ~nothing and allocate nothing. Asserts on
   // process CPU time (never wall clock), median of 5 runs after warmup, with
-  // a generous band — a regression that adds parsing/allocation to the
+  // a generous band: a regression that adds parsing/allocation to the
   // reject path breaks the band long before users feel it.
   // Host: process.cpuUsage; perf events unavailable in this container, stated.
   const events = [
@@ -601,7 +601,7 @@ test('resume queues the round a paused turn held back', async () => {
   await settle()
   assert.equal(followups.length, 2, 'resume drives the held round with no other turn left to come')
   assert.match(followups[1].content.at(-1).text, /round 2\/3/)
-  assert.equal(invoke('status').text, 'Loop for "continue" is running — round 2 of 3.')
+  assert.equal(invoke('status').text, 'Loop for "continue" is running at round 2 of 3.')
 })
 
 test('a round queued before unload never lands after the plugin disposes', async () => {

@@ -4,7 +4,7 @@
  *
  * The unit suite drives plain-object fakes, which cannot show whether a
  * registration is released, and the Web client reloads profile rows on every
- * edit — a leaked command or projection unit would fail the next reload. The
+ * edit: a leaked command or projection unit would fail the next reload. The
  * optional `sessionProjections` seam is exercised both ways here: absent, and
  * provided as a real service.
  *
