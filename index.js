@@ -61,8 +61,13 @@ export function parseArgs(input) {
       text: 'A nested /loop stop would end the loop from inside its own replay. Stop it from the composer instead.',
     }
   }
+  // The budget rides in the projection's integer schema and the round relay
+  // line, so it must stay an exact integer.
   const rounds = Number(match[1])
-  return { kind: 'loop', rounds: Number(match[1]), command: match[2].trim() }
+  if (!Number.isSafeInteger(rounds)) {
+    return { kind: 'error', text: `Rounds must be a whole number from 0 to ${Number.MAX_SAFE_INTEGER}.` }
+  }
+  return { kind: 'loop', rounds, command }
 }
 
 /** Human label for the budget. */
@@ -96,7 +101,7 @@ export function parseRoundLine(text) {
   const run = Number(match[1])
   const budget = match[2] === '∞ (stop with /loop stop)' ? 0 : Number(match[2])
   const command = match[3].trim()
-  if (!Number.isInteger(run) || run < 1 || !Number.isInteger(budget) || budget < 0 || command === '') return undefined
+  if (!Number.isSafeInteger(run) || run < 1 || !Number.isSafeInteger(budget) || budget < 0 || command === '') return undefined
   return { run, rounds: budget, command }
 }
 

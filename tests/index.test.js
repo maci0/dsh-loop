@@ -39,6 +39,41 @@ test('parseArgs rejects malformed input', () => {
   assert.equal(parseArgs('10 ').kind, 'error', 'trailing space is not a command')
 })
 
+test('a round budget past the safe-integer range is rejected, never started', () => {
+  // Regression: `\d+` admitted any digit string, so a 400-digit budget became
+  // Infinity. The loop started, and the projection view (an integer schema)
+  // threw on every snapshot of the session.
+  const huge = `${'9'.repeat(400)} continue`
+  const parsed = parseArgs(huge)
+  assert.equal(parsed.kind, 'error')
+  assert.match(parsed.text, /9007199254740991/)
+  assert.equal(parseArgs(`${Number.MAX_SAFE_INTEGER + 2} continue`).kind, 'error')
+  assert.deepEqual(
+    parseArgs(`${Number.MAX_SAFE_INTEGER} continue`),
+    { kind: 'loop', rounds: Number.MAX_SAFE_INTEGER, command: 'continue' },
+  )
+
+  const registered = []
+  const ctx = {
+    commands: { register: (def) => { registered.push(def); return () => {} } },
+    agents: new Map(),
+    on: () => () => {},
+    effect: (fn) => fn(),
+  }
+  apply(ctx)
+  const followups = []
+  const agent = { session: { id: 's12' }, whenIdle: () => Promise.resolve(), followup: (m) => followups.push(m) }
+  const result = registered[0].handler({ rawInput: huge, attachments: [], agent })
+  assert.equal(result.kind, 'error')
+  assert.equal(followups.length, 0, 'no round queues for a rejected budget')
+
+  assert.equal(loopProjection.apply(null, {
+    type: 'command/run', data: { commandId: 'cmd-1', name: 'loop', args: huge, source: { kind: 'user' } },
+  }), null, 'the fold never starts a pill the driver refused')
+  assert.equal(parseRoundLine('[loop round 1/1e+400]\ncontinue'), undefined)
+  assert.equal(parseRoundLine(`[loop round 1/${'9'.repeat(30)}]\ncontinue`), undefined)
+})
+
 test('budget labels', () => {
   assert.equal(budgetLabel(0), '∞ (stop with /loop stop)')
   assert.equal(budgetLabel(10), '10')
