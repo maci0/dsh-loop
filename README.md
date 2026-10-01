@@ -62,7 +62,9 @@ driver queues each round), and the client half reads the projected view via
 verb moves the pill only once its `command/done` settles as `success`. The
 driver appends no custom event type: an unknown non-ignorable type makes the
 persistence read path refuse the whole session. The buttons submit the
-host-side `/loop pause | resume | stop` commands (no model turn).
+host-side `/loop pause | resume | stop` commands (no model turn). A verb that
+fails replaces the label with "Stop failed" (or Pause, Resume), the error
+message as its tooltip, until the next action or projection change.
 
 ### Restarts
 
