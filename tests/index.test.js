@@ -5,6 +5,19 @@ import { parseArgs, parseRoundLine, budgetLabel, roundMessage, apply, loopProjec
 /** Let the driver's deferred round queue, since a round never queues inside the turn/end publication. */
 const settle = () => new Promise((resolve) => setImmediate(resolve))
 
+/** A `/loop` lifecycle row pair, as the command executor appends them. */
+const loopRun = (commandId, args) => ({
+  type: 'command/run', data: { commandId, name: 'loop', args, source: { kind: 'user' } },
+})
+const loopDone = (commandId, kind) => ({ type: 'command/done', data: { commandId, kind, text: 'x' } })
+
+/** Fold one `/loop <args>` invocation that settled as `success`. */
+const settled = (state, commandId, args) =>
+  loopProjection.apply(loopProjection.apply(state, loopRun(commandId, args)), loopDone(commandId, 'success'))
+
+/** The fold state for a given pill view. */
+const foldOf = (loop) => ({ loop, pending: null })
+
 test('parseArgs reads the documented forms', () => {
   assert.deepEqual(parseArgs('10 /perf-review'), { kind: 'loop', rounds: 10, command: '/perf-review' })
   assert.deepEqual(parseArgs(' 10 continue '), { kind: 'loop', rounds: 10, command: 'continue' })
@@ -67,9 +80,11 @@ test('a round budget past the safe-integer range is rejected, never started', ()
   assert.equal(result.kind, 'error')
   assert.equal(followups.length, 0, 'no round queues for a rejected budget')
 
-  assert.equal(loopProjection.apply(null, {
-    type: 'command/run', data: { commandId: 'cmd-1', name: 'loop', args: huge, source: { kind: 'user' } },
-  }), null, 'the fold never starts a pill the driver refused')
+  assert.equal(
+    loopProjection.wire.view(settled(loopProjection.init({}, 0), 'cmd-1', huge)),
+    null,
+    'the fold never starts a pill the driver refused',
+  )
   assert.equal(parseRoundLine('[loop round 1/1e+400]\ncontinue'), undefined)
   assert.equal(parseRoundLine(`[loop round 1/${'9'.repeat(30)}]\ncontinue`), undefined)
 })
@@ -354,7 +369,7 @@ test('verbs adopt the durable fold after the process forgets the loop', async ()
     on: (event, fn) => { listeners.push([event, fn]); return () => {} },
     effect: (fn) => fn(),
     get: (key) => key === 'sessionProjections'
-      ? { stateOf: () => ({ ...projected }) }
+      ? { stateOf: () => foldOf(projected.phase === 'dead' ? null : { ...projected }) }
       : undefined,
   }
   apply(ctx)
@@ -367,7 +382,7 @@ test('verbs adopt the durable fold after the process forgets the loop', async ()
 
   // Stop lands on the adopted entry.
   assert.equal(invoke('stop').text, 'Loop for "continue" stopped after 1 round(s).')
-  projected.phase = 'stopped'
+  projected.phase = 'dead'
   assert.equal(invoke('stop').text, 'No loop is running.', 'stopped stays dead, never re-adopts')
 
   // Pause adopts, holds, and resumes across the same gap.
@@ -390,7 +405,7 @@ test('verbs ignore a dead or absent fold', () => {
       agents: new Map(),
       on: () => () => {},
       effect: (fn) => fn(),
-      get: () => ({ stateOf: () => fold }),
+      get: () => ({ stateOf: () => (fold === undefined ? undefined : foldOf(fold)) }),
     }
     apply(ctx)
     const agent = { session: { id: 's9' }, whenIdle: () => Promise.resolve(), followup: () => {} }
@@ -402,15 +417,17 @@ test('verbs ignore a dead or absent fold', () => {
 })
 
 test('projection unit folds the loop lifecycle without custom events', () => {
-  assert.equal(loopProjection.init({}, 0), null)
+  const init = loopProjection.init({}, 0)
+  assert.deepEqual(init, foldOf(null))
+  const view = (state) => loopProjection.wire.view(state)
   const turnEnd = { type: 'turn/end', data: {} }
-  assert.equal(loopProjection.apply(null, turnEnd), null, 'uninterested events keep the reference')
+  assert.equal(loopProjection.apply(init, turnEnd), init, 'uninterested events keep the reference')
 
-  // `/loop 5 continue` starts the pill.
-  const started = loopProjection.apply(null, {
-    type: 'command/run', data: { commandId: 'cmd-1', name: 'loop', args: ' 5 continue ', source: { kind: 'user' } },
-  })
-  assert.deepEqual(started, { phase: 'active', command: 'continue', rounds: 5, run: 1 })
+  // `/loop 5 continue` starts the pill once its handler settles.
+  const running = loopProjection.apply(init, loopRun('cmd-1', ' 5 continue '))
+  assert.equal(view(running), null, 'no pill before the handler settles')
+  const started = loopProjection.apply(running, loopDone('cmd-1', 'success'))
+  assert.deepEqual(view(started), { phase: 'active', command: 'continue', rounds: 5, run: 1 })
 
   // The claimed round-2 relay line advances the counter.
   const relay = (run, rounds) => ({
@@ -421,35 +438,58 @@ test('projection unit folds the loop lifecycle without custom events', () => {
     },
   })
   const round2 = loopProjection.apply(started, relay(2, 5))
-  assert.deepEqual(round2, { phase: 'active', command: 'continue', rounds: 5, run: 2 })
+  assert.deepEqual(view(round2), { phase: 'active', command: 'continue', rounds: 5, run: 2 })
 
   // Pause and resume freeze and thaw the pill.
-  const paused = loopProjection.apply(round2, {
-    type: 'command/run', data: { commandId: 'cmd-2', name: 'loop', args: 'pause', source: { kind: 'user' } },
-  })
-  assert.deepEqual(paused, { phase: 'paused', command: 'continue', rounds: 5, run: 2 })
-  const resumed = loopProjection.apply(paused, {
-    type: 'command/run', data: { commandId: 'cmd-3', name: 'loop', args: 'resume', source: { kind: 'user' } },
-  })
-  assert.deepEqual(resumed, { phase: 'active', command: 'continue', rounds: 5, run: 2 })
+  const paused = settled(round2, 'cmd-2', 'pause')
+  assert.deepEqual(view(paused), { phase: 'paused', command: 'continue', rounds: 5, run: 2 })
+  const resumed = settled(paused, 'cmd-3', 'resume')
+  assert.deepEqual(view(resumed), { phase: 'active', command: 'continue', rounds: 5, run: 2 })
 
   // Stop clears the pill; other commands and plugins never touch it.
-  const stopped = loopProjection.apply(resumed, {
-    type: 'command/run', data: { commandId: 'cmd-4', name: 'loop', args: 'stop', source: { kind: 'user' } },
-  })
-  assert.equal(stopped, null)
+  assert.equal(view(settled(resumed, 'cmd-4', 'stop')), null)
   assert.equal(loopProjection.apply(resumed, {
     type: 'command/run', data: { commandId: 'cmd-5', name: 'goal', args: 'x', source: { kind: 'user' } },
   }), resumed)
+  assert.equal(loopProjection.apply(resumed, loopDone('cmd-5', 'success')), resumed)
   assert.equal(loopProjection.apply(resumed, {
     type: 'user/message',
     data: { source: { kind: 'other', form: 'relay' }, content: [{ type: 'text', text: '[loop round 9/5]\nforged' }] },
   }), resumed, 'a forged relay from another plugin cannot move the counter')
 
-  // The wire schema validates the view before it leaves the host.
-  assert.deepEqual(loopProjection.wire.viewSchema.parse(round2), round2)
-  assert.equal(loopProjection.wire.view(round2), round2)
-  assert.equal(loopProjection.stateVersion, 3, 'the spent-budget fold rule changed the semantics')
+  // The wire schema validates the view before it leaves the host, and the
+  // persisted state passes its own schema.
+  assert.deepEqual(loopProjection.wire.viewSchema.parse(view(round2)), view(round2))
+  assert.deepEqual(loopProjection.stateSchema.parse(running), running)
+  assert.equal(view(round2), round2.loop)
+  assert.equal(loopProjection.stateVersion, 4, 'the fold state gained the pending invocation')
+})
+
+test('a /loop that settles as an error never moves the pill', () => {
+  // Regression: the fold acted on `command/run`, which the executor appends
+  // before attachment admission and the handler run. A start that then
+  // settled as an error (rejected attachment, cancelled request) showed a pill
+  // for a loop the driver never started, and the verbs adopted it.
+  const run = loopRun
+  const done = loopDone
+  const view = (state) => loopProjection.wire.view(state)
+  const init = loopProjection.init({}, 0)
+
+  const failedStart = loopProjection.apply(loopProjection.apply(init, run('c1', '3 continue')), done('c1', 'error'))
+  assert.equal(view(failedStart), null, 'a failed start leaves no pill')
+
+  const started = loopProjection.apply(loopProjection.apply(init, run('c2', '3 continue')), done('c2', 'success'))
+  assert.deepEqual(view(started), { phase: 'active', command: 'continue', rounds: 3, run: 1 })
+
+  const failedPause = loopProjection.apply(loopProjection.apply(started, run('c3', 'pause')), done('c3', 'error'))
+  assert.equal(view(failedPause), view(started), 'a failed pause keeps the pill running')
+  const failedStop = loopProjection.apply(loopProjection.apply(started, run('c4', 'stop')), done('c4', 'error'))
+  assert.equal(view(failedStop), view(started), 'a failed stop keeps the pill')
+
+  // A done row for another command id never applies the pending one.
+  const pending = loopProjection.apply(started, run('c5', 'stop'))
+  assert.equal(view(loopProjection.apply(pending, done('other', 'success'))), view(started))
+  assert.equal(view(loopProjection.apply(pending, done('c5', 'success'))), null)
 })
 
 test('a finite loop clears the pill when its budget is spent', () => {
@@ -464,20 +504,18 @@ test('a finite loop clears the pill when its budget is spent', () => {
       content: [{ type: 'text', text: `[loop round ${run}/${rounds}]\ncontinue` }],
     },
   })
-  const started = loopProjection.apply(null, {
-    type: 'command/run', data: { commandId: 'cmd-1', name: 'loop', args: '2 continue', source: { kind: 'user' } },
-  })
+  const started = settled(loopProjection.init({}, 0), 'cmd-1', '2 continue')
   const lastRound = loopProjection.apply(started, relay(2, 2))
-  assert.deepEqual(lastRound, { phase: 'active', command: 'continue', rounds: 2, run: 2 })
+  assert.deepEqual(lastRound.loop, { phase: 'active', command: 'continue', rounds: 2, run: 2 })
 
   assert.equal(
-    loopProjection.apply(lastRound, turnEnd),
+    loopProjection.apply(lastRound, turnEnd).loop,
     null,
     'the last round settled: the fold is dead, never re-adopted',
   )
 
   // An infinite loop never spends, so its pill stays through every turn.
-  const open = { phase: 'active', command: 'continue', rounds: 0, run: 5 }
+  const open = foldOf({ phase: 'active', command: 'continue', rounds: 0, run: 5 })
   assert.equal(loopProjection.apply(open, turnEnd), open)
 })
 
@@ -503,9 +541,10 @@ test('fold rejects foreign events by reference within a CPU band', () => {
     { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] } },
     { type: 'command/run', data: { commandId: 'c', name: 'goal', args: 'x', source: { kind: 'user' } } },
   ]
-  const live = { phase: 'active', command: 'continue', rounds: 5, run: 2 }
+  const idle = foldOf(null)
+  const live = foldOf({ phase: 'active', command: 'continue', rounds: 5, run: 2 })
   for (const event of events) {
-    assert.equal(loopProjection.apply(null, event), null)
+    assert.equal(loopProjection.apply(idle, event), idle)
     assert.equal(loopProjection.apply(live, event), live, `${event.type} must keep the reference`)
   }
   const ITERS = 100000
