@@ -17,6 +17,10 @@ turn, for a fixed number of rounds or until you stop it.
 /loop status                        # what is running, and how far along
 ```
 
+Files attached to a `/loop <rounds> <command>` go out with round 1. `pause`,
+`resume`, `stop`, and `status` take no attachments: they answer an error and
+the composer keeps the files.
+
 In the Web client, a pill above the composer shows the running loop with
 Pause, Resume, and Stop buttons.
 

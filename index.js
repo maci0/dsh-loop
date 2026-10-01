@@ -278,6 +278,13 @@ function loopHandler(invocation, state, ctx) {
   const parsed = parseArgs(invocation.rawInput)
   if (parsed.kind === 'error') return { kind: 'error', text: parsed.text }
 
+  // Only a start sends attachments (with round 1). A verb opens no turn of its
+  // own, so it refuses them and the composer keeps the files, as the command
+  // contract asks of a handler that cannot use them.
+  if (parsed.kind !== 'loop' && invocation.attachments.length > 0) {
+    return { kind: 'error', text: `/loop ${parsed.kind} takes no attachments; send them with the command a loop repeats.` }
+  }
+
   const sessionId = invocation.agent.session.id
   if (parsed.kind === 'stop') {
     const loop = liveLoop(ctx, state, invocation.agent.session)
@@ -312,7 +319,7 @@ function loopHandler(invocation, state, ctx) {
     // would ever drive it.
     const held = loop.held
     loop.held = undefined
-    if (held !== undefined) queueRound(invocation.agent, loop, held, invocation.attachments)
+    if (held !== undefined) queueRound(invocation.agent, loop, held, [])
     return { kind: 'success', text }
   }
 
