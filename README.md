@@ -86,9 +86,12 @@ re-adopted.
 
 ## Development
 
+dsh loads plugins on Node `^22.19.0 || >=24.0.0`; development and tests run on
+bun.
+
 ```sh
-npm ci
-npm test
+bun install --frozen-lockfile
+bun test
 ```
 
 For local development, `dsh plugin --profile <name> add <path-to-checkout>`.
