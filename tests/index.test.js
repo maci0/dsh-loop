@@ -772,3 +772,39 @@ test('a remount adopts the round in flight and the round a pause held', async ()
   assert.equal(restarted.followups.length, 1, 'resume runs the held round after a restart')
   assert.match(restarted.followups[0].content.at(-1).text, /round 2\/3/)
 })
+
+test('the verbs refuse attachments, so the composer keeps them; a start sends them with round 1', async () => {
+  const registered = []
+  const listeners = []
+  const ctx = {
+    commands: { register: (def) => { registered.push(def); return () => {} } },
+    agents: new Map(),
+    on: (event, fn) => { listeners.push([event, fn]); return () => {} },
+    effect: (fn) => fn(),
+  }
+  apply(ctx)
+  const session = { id: 's9', appended: [], append(type, data) { this.appended.push([type, data]) } }
+  const followups = []
+  const agent = { session, whenIdle: () => Promise.resolve(), followup: (m) => followups.push(m) }
+  ctx.agents.set('s9', agent)
+  const image = { type: 'image', data: 'AAAA', mimeType: 'image/png' }
+  const invoke = (input, attachments = []) => registered[0].handler({ rawInput: input, attachments, agent })
+
+  assert.equal(invoke('3 continue', [image]).kind, 'success')
+  assert.deepEqual(followups[0].content[0], image, 'round 1 carries what the start attached')
+
+  for (const verb of ['pause', 'resume', 'stop', 'status']) {
+    const result = invoke(verb, [image])
+    assert.equal(result.kind, 'error', `/loop ${verb} with an attachment`)
+    assert.match(result.text, /takes no attachments/)
+  }
+  assert.match(invoke('status').text, /is running at round 1/, 'a refused verb changed nothing')
+
+  // A held round resumes without anything new attached.
+  invoke('pause')
+  endRound(listeners[0][1], session, followups.at(-1))
+  await settle()
+  invoke('resume')
+  assert.equal(followups.length, 2)
+  assert.deepEqual(followups[1].content.map((block) => block.type), ['text'])
+})
