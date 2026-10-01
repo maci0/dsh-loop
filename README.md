@@ -39,11 +39,18 @@ The bundled `cordis.patch.yml` inserts the `loop` row automatically.
 ## How it works
 
 `/loop <rounds> <command>` queues the command as the agent's next turn (round
-1). After each completed turn, the plugin queues the next round until the
-budget is spent. `rounds = 0` never spends; `/loop stop` cancels at any time,
-and `/loop status` answers whether one is running or paused, and at which
-round. The pill shows the same state, but only the Web client has a pill.
-Loops are per-session; only a *completed* turn advances the round.
+1). When the turn that round opened completes, the plugin queues the next
+round until the budget is spent. `rounds = 0` never spends; `/loop stop`
+cancels at any time, and `/loop status` answers whether one is running or
+paused, and at which round. The pill shows the same state, but only the Web
+client has a pill. Loops are per-session.
+
+Only the turn a round's own queued message opened moves the loop. A turn
+already running when `/loop` was typed, or one you open between rounds,
+leaves the round where it is. A round turn that ends any way other than
+`completed` (aborted, error, blocked, max-tokens, or interrupted by a
+restart) pauses the loop at that round; `/loop resume` runs the same round
+again.
 
 A round is queued once the agent reaches quiescence (`Agent.whenIdle()`),
 never from inside the `turn/end` publication: `followup()` appends, a session
@@ -70,9 +77,11 @@ message as its tooltip, until the next action or projection change.
 
 The round driver is process memory; the folded log is durable. After a
 restart the verbs re-adopt an `active` or `paused` fold from the projection
-registry, so `/loop stop` clears a pill the fresh process never started and
-the pill can never strand. A stopped or spent fold stays dead and is never
-re-adopted.
+registry, with the round turn in flight and the round a pause or interruption
+holds, so `/loop stop` clears a pill the fresh process never started, the pill
+can never strand, and `/loop resume` runs the held round. A round turn cut off
+by the restart is closed as `interrupted` in the log, which pauses the loop. A
+stopped or spent fold stays dead and is never re-adopted.
 
 ## Limits
 
@@ -81,8 +90,6 @@ re-adopted.
 - No round cap on infinite loops: it runs until `/loop stop`. Watch quota.
 - A finite budget is a whole number up to 9007199254740991; larger values are
   rejected.
-- Every completed turn in the session advances the round, including a turn
-  that was already running when the loop started.
 
 ## Development
 
