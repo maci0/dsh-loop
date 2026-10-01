@@ -1,28 +1,29 @@
 /**
  * Browser half: the loop pill.
  *
- * `lib/client.js` is imported as a real module over a stub
+ * `lib/client.js` is imported once as a real module over a stub
  * `window.__ModuleLoader__`, which captures the factory the module system
- * would materialize; the factory then runs over a minimal React (element
- * trees plus `useState`), so the pill renders without a DOM.
+ * would materialize. The factory is the per-mount unit: every case runs it
+ * over its own minimal React (element trees plus `useState`), so the pill
+ * renders without a DOM.
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-let loads = 0
-
-/** Import a fresh evaluation of the client file and return its captured definition. */
+/** Import the client file and return the definition it registers. */
 async function loadClient() {
   let captured
   globalThis.window = { __ModuleLoader__: { load: (definition) => { captured = definition } } }
   try {
-    await import(`../lib/client.js?case=${++loads}`)
+    await import('../lib/client.js')
   } finally {
     delete globalThis.window
   }
   return captured
 }
+
+const definition = await loadClient()
 
 /** Element trees plus `useState` cells that persist across renders. */
 function createReact() {
@@ -63,7 +64,6 @@ function textOf(node) {
 
 /** Mount the client plugin over a fake context and return the pill harness. */
 async function mountPill({ command }) {
-  const definition = await loadClient()
   assert.equal(definition.id, 'dsh-loop')
   const React = createReact()
   const exports = definition.factory((id) => {
