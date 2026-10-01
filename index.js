@@ -48,7 +48,7 @@ export function parseArgs(input) {
   // A status verb exists because the pill is a Web surface: a session driven
   // from a terminal has no other way to ask whether a loop is running.
   if (verb === 'status' || verb === 'list') return { kind: 'status' }
-  const match = /^(\d+)\s+(.+)$/.exec(trimmed)
+  const match = /^(\d+)\s+([\s\S]+)$/.exec(trimmed)
   if (!match) {
     return {
       kind: 'error',
@@ -133,6 +133,7 @@ const loopViewSchema = z.object({
  */
 const loopStateSchema = z.object({
   loop: loopViewSchema,
+  loopId: z.string().nullable(),
   pending: z.object({ commandId: z.string(), args: z.string() }).nullable(),
   inRound: z.boolean(),
   held: z.number().int().positive().nullable(),
@@ -145,9 +146,9 @@ function settleVerb(state, args) {
   if (parsed.kind === 'loop') {
     // Round 1's relay always lands after this row: the agent appends it only
     // once its turn claims the inbox, past an await.
-    return { loop: { phase: 'active', command: parsed.command, rounds: parsed.rounds, run: 1 }, pending: null, inRound: false, held: null }
+    return { loop: { phase: 'active', command: parsed.command, rounds: parsed.rounds, run: 1 }, loopId: state.pending.commandId, pending: null, inRound: false, held: null }
   }
-  if (parsed.kind === 'stop') return { loop: null, pending: null, inRound: false, held: null }
+  if (parsed.kind === 'stop') return { loop: null, loopId: state.pending.commandId, pending: null, inRound: false, held: null }
   if (loop === null) return { ...state, pending: null }
   if (parsed.kind === 'pause' && loop.phase === 'active') {
     // Paused between rounds, the driver holds the next round once its wait
@@ -173,7 +174,7 @@ function settleVerb(state, args) {
 export const loopProjection = {
   key: 'loop',
   stateSchema: loopStateSchema,
-  init: () => ({ loop: null, pending: null, inRound: false, held: null }),
+  init: () => ({ loop: null, loopId: null, pending: null, inRound: false, held: null }),
   apply: (state, event) => {
     if (event.type === 'turn/end') {
       if (!state.inRound) return state
@@ -185,7 +186,7 @@ export const loopProjection = {
       // The spent budget is the fold's terminal edge. The driver drops a spent
       // loop with nothing appended (the round relay is the last canonical
       // row), so this turn/end is the only signal that the pill must clear.
-      if (loop.rounds !== 0 && loop.run >= loop.rounds) return { ...state, inRound: false, loop: null, held: null }
+      if (loop.rounds !== 0 && loop.run >= loop.rounds) return { ...state, inRound: false, loop: null, loopId: state.loopId ?? '', held: null }
       return { ...state, inRound: false, held: loop.phase === 'paused' ? loop.run + 1 : null }
     }
     if (event.type === 'command/run' && event.data?.name === 'loop'
@@ -198,6 +199,9 @@ export const loopProjection = {
       return event.data.kind === 'success' ? settleVerb(state, pending.args) : { ...state, pending: null }
     }
     if (!isLoopRelay(event)) return state
+    // A relay already in the inbox may land after stop or a replacement start.
+    if (state.loop === null && state.loopId !== null) return state
+    if (event.data.source.loopId !== undefined && event.data.source.loopId !== state.loopId) return state
     const blocks = Array.isArray(event.data?.content) ? event.data.content : []
     const text = blocks.filter((block) => block?.type === 'text').map((block) => block.text).join('')
     const round = parseRoundLine(text)
@@ -210,7 +214,7 @@ export const loopProjection = {
     viewSchema: loopViewSchema,
     view: state => state.loop,
   },
-  stateVersion: 5,
+  stateVersion: 6,
 }
 
 /**
@@ -225,7 +229,7 @@ export const loopProjection = {
 function queueRound(agent, loop, run, attachments) {
   const message = createUserMessage({
     content: [...attachments, { type: 'text', text: roundMessage(loop.command, run, loop.rounds) }],
-    source: { kind: 'loop', form: 'relay' },
+    source: { kind: 'loop', form: 'relay', ...(loop.id === undefined ? {} : { loopId: loop.id }) },
   })
   loop.run = run
   loop.relayId = message.id
@@ -263,6 +267,7 @@ function liveLoop(ctx, state, session) {
   const fold = readProjectedLoop(ctx, session)
   if (!fold) return undefined
   const adopted = {
+    id: fold.loopId ?? undefined,
     command: fold.loop.command,
     rounds: fold.loop.rounds,
     run: fold.loop.run,
@@ -323,7 +328,7 @@ function loopHandler(invocation, state, ctx) {
     return { kind: 'success', text }
   }
 
-  const loop = { command: parsed.command, rounds: parsed.rounds, run: 1 }
+  const loop = { id: invocation.commandId, command: parsed.command, rounds: parsed.rounds, run: 1 }
   state.loops.set(sessionId, loop)
   queueRound(invocation.agent, loop, 1, invocation.attachments)
   return {

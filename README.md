@@ -21,6 +21,8 @@ Files attached to a `/loop <rounds> <command>` go out with round 1. `pause`,
 `resume`, `stop`, and `status` take no attachments: they answer an error and
 the composer keeps the files.
 
+The command can span multiple lines; each round preserves its formatting.
+
 In the Web client, a pill above the composer shows the running loop with
 Pause, Resume, and Stop buttons.
 
@@ -31,7 +33,7 @@ Pause, Resume, and Stop buttons.
 > row added with `--patch` is an overlay: it disappears at the next start.
 
 ```sh
-dsh plugin --profile web add github:maci0/dsh-loop#v0.10.0
+dsh plugin --profile web add github:maci0/dsh-loop#v0.10.1
 ```
 
 Pin a release tag: a bare `github:` spec floats on `main`. To upgrade, run the
@@ -86,6 +88,8 @@ holds, so `/loop stop` clears a pill the fresh process never started, the pill
 can never strand, and `/loop resume` runs the held round. A round turn cut off
 by the restart is closed as `interrupted` in the log, which pauses the loop. A
 stopped or spent fold stays dead and is never re-adopted.
+Queued relays carry the original loop invocation id, so a relay from a stopped
+or replaced loop cannot reactivate its pill or overwrite the newer loop.
 
 ## Limits
 

@@ -22,13 +22,14 @@ const settled = (state, commandId, args) =>
   loopProjection.apply(loopProjection.apply(state, loopRun(commandId, args)), loopDone(commandId, 'success'))
 
 /** The fold state for a given pill view, with no round turn open or held. */
-const foldOf = (loop) => ({ loop, pending: null, inRound: false, held: null })
+const foldOf = (loop) => ({ loop, loopId: null, pending: null, inRound: false, held: null })
 
 test('parseArgs reads the documented forms', () => {
   assert.deepEqual(parseArgs('10 /perf-review'), { kind: 'loop', rounds: 10, command: '/perf-review' })
   assert.deepEqual(parseArgs(' 10 continue '), { kind: 'loop', rounds: 10, command: 'continue' })
   assert.deepEqual(parseArgs('0 continue'), { kind: 'loop', rounds: 0, command: 'continue' })
   assert.deepEqual(parseArgs('3 bash -c "echo hi"'), { kind: 'loop', rounds: 3, command: 'bash -c "echo hi"' })
+  assert.deepEqual(parseArgs('3 review:\n  first\n  second'), { kind: 'loop', rounds: 3, command: 'review:\n  first\n  second' })
   assert.deepEqual(
     parseArgs('10 /perf-review && /cordis-review'),
     { kind: 'loop', rounds: 10, command: '/perf-review && /cordis-review' },
@@ -125,6 +126,7 @@ test('apply registers /loop and drives rounds on turn/end', async () => {
   ctx.agents.set('s1', agent)
   const turnEnd = { type: 'turn/end', data: { reason: { kind: 'completed' } } }
   const invoke = (input) => registered[0].handler({
+    commandId: 'start-s1',
     rawInput: input,
     attachments: [],
     agent,
@@ -135,12 +137,14 @@ test('apply registers /loop and drives rounds on turn/end', async () => {
   assert.equal(start.kind, 'success')
   assert.equal(followups.length, 1)
   assert.match(followups[0].content.at(-1).text, /round 1\/2/)
+  assert.equal(followups[0].source.loopId, 'start-s1')
 
   // Round 1 completes → round 2 queues.
   endRound(listeners[0][1], session, followups.at(-1))
   await settle()
   assert.equal(followups.length, 2)
   assert.match(followups[1].content.at(-1).text, /round 2\/2/)
+  assert.equal(followups[1].source.loopId, 'start-s1', 'all rounds carry the original invocation id')
 
   // Round 2 completes → budget spent, nothing more queues.
   endRound(listeners[0][1], session, followups.at(-1))
@@ -473,7 +477,7 @@ test('projection unit folds the loop lifecycle without custom events', () => {
   assert.deepEqual(loopProjection.wire.viewSchema.parse(view(round2)), view(round2))
   assert.deepEqual(loopProjection.stateSchema.parse(running), running)
   assert.equal(view(round2), round2.loop)
-  assert.equal(loopProjection.stateVersion, 5, 'the fold state gained the round turn and the held round')
+  assert.equal(loopProjection.stateVersion, 6, 'the fold identifies each loop invocation')
 })
 
 test('a /loop that settles as an error never moves the pill', () => {
@@ -501,6 +505,25 @@ test('a /loop that settles as an error never moves the pill', () => {
   const pending = loopProjection.apply(started, run('c5', 'stop'))
   assert.equal(view(loopProjection.apply(pending, done('other', 'success'))), view(started))
   assert.equal(view(loopProjection.apply(pending, done('c5', 'success'))), null)
+})
+
+test('a queued relay cannot revive a stopped loop or replace a newer invocation', () => {
+  const relay = (loopId) => ({ type: 'user/message', data: {
+    source: { kind: 'loop', form: 'relay', ...(loopId === undefined ? {} : { loopId }) },
+    content: [{ type: 'text', text: roundMessage('continue', 1, 2) }],
+  } })
+  const started = settled(loopProjection.init({}, 0), 'start-1', '2 continue')
+  const stopped = settled(started, 'stop-1', 'stop')
+  for (const message of [relay('start-1'), relay(undefined)]) {
+    assert.equal(loopProjection.apply(stopped, message), stopped, 'a stopped loop remains stopped')
+  }
+  const replaced = settled(started, 'start-2', '2 continue')
+  assert.equal(loopProjection.apply(replaced, relay('start-1')), replaced, 'an older invocation with identical text is still obsolete')
+  assert.equal(loopProjection.apply(replaced, relay('start-2')).inRound, true)
+  assert.equal(loopProjection.apply(loopProjection.init({}, 0), relay(undefined)).inRound, true, 'old untagged logs still fold')
+  const legacyRound = loopProjection.apply(loopProjection.init({}, 0), relay(undefined))
+  const spent = loopProjection.apply({ ...legacyRound, loop: { ...legacyRound.loop, run: 2 } }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  assert.equal(loopProjection.apply(spent, relay(undefined)), spent, 'a spent legacy loop remains dead too')
 })
 
 test('a finite loop clears the pill when its budget is spent', () => {
@@ -759,12 +782,13 @@ test('the fold follows only the turns its rounds opened', () => {
 test('a remount adopts the round in flight and the round a pause held', async () => {
   // The fold carries what the driver's memory held: whether a round's turn is
   // open, and which round a pause or an interruption holds back.
-  const fold = { loop: { phase: 'active', command: 'continue', rounds: 3, run: 1 }, pending: null, inRound: true, held: null }
+  const fold = { loop: { phase: 'active', command: 'continue', rounds: 3, run: 1 }, loopId: 'start-s22', pending: null, inRound: true, held: null }
   const live = mountDriver('s22', { stateOf: () => fold })
   assert.equal(live.invoke('status').text, 'Loop for "continue" is running at round 1 of 3.')
   await live.turn({ id: 'from-before-the-remount', source: { kind: 'loop' } })
   assert.equal(live.followups.length, 1, 'the adopted round in flight still drives the next one')
   assert.match(live.followups[0].content.at(-1).text, /round 2\/3/)
+  assert.equal(live.followups[0].source.loopId, 'start-s22', 'the invocation id survives a remount')
 
   const parked = { loop: { phase: 'paused', command: 'continue', rounds: 3, run: 2 }, pending: null, inRound: false, held: 2 }
   const restarted = mountDriver('s23', { stateOf: () => parked })
