@@ -1,7 +1,10 @@
 {
-  "name": "dsh-loop",
-  "version": "0.10.1",
-  "private": true,
+  "name": "@maci0/dsh-loop",
+  "version": "0.10.2",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "type": "module",
   "main": "index.js",
   "description": "/loop <rounds> <command> for DeepSeek Harness: repeat a command across agent turns; 0 loops forever, /loop stop ends it.",
@@ -49,7 +52,7 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.4"
+    "@deepseek-ai/cordis": "4.0.5-alpha.1"
   },
   "repository": {
     "type": "git",
@@ -57,7 +60,7 @@
   },
   "icon": "./icon.svg",
   "dependencies": {
-    "@deepseek-ai/dsh-llm": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-alpha.2",
     "zod": "^4.4.3"
   }
 }

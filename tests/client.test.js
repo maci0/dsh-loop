@@ -64,7 +64,7 @@ function textOf(node) {
 
 /** Mount the client plugin over a fake context and return the pill harness. */
 async function mountPill({ command }) {
-  assert.equal(definition.id, 'dsh-loop')
+  assert.equal(definition.id, '@maci0/dsh-loop')
   const React = createReact()
   const exports = definition.factory((id) => {
     assert.equal(id, 'react')
