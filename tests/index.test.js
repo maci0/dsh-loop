@@ -355,6 +355,37 @@ test('a round never queues inside the turn/end publication', async () => {
   assert.match(followups[1].content.at(-1).text, /round 2\/2/)
 })
 
+test('stop, pause, and replacement withdraw only their own pending loop prompts', () => {
+  let handler
+  const pending = []
+  const agent = {
+    session: { id: 'queued-stop' },
+    followup: (message) => { pending.push(message) },
+    inbox: { nextTurn: pending, remove: (id) => {
+      const index = pending.findIndex((message) => message.id === id)
+      if (index < 0) return false
+      pending.splice(index, 1)
+      return true
+    } },
+  }
+  apply({
+    commands: { register: (definition) => { handler = definition.handler; return () => {} } },
+    agents: new Map(), on: () => () => {}, effect: (fn) => fn(),
+  })
+  const invoke = (rawInput) => handler({ rawInput, attachments: [], agent, commandId: 'loop-1' })
+  invoke('3 continue')
+  pending.push({ id: 'human', source: { kind: 'user' } }, { id: 'other-loop', source: { kind: 'loop', loopId: 'loop-2' } })
+  invoke('2 replacement')
+  assert.equal(pending.length, 3, 'replacement removes the old prompt before queuing its own')
+  assert.match(pending.at(-1).content[0].text, /replacement/)
+  invoke('pause')
+  assert.deepEqual(pending.map((message) => message.id), ['human', 'other-loop'])
+  invoke('resume')
+  assert.match(pending.at(-1).content[0].text, /round 1\/2/)
+  invoke('stop')
+  assert.deepEqual(pending.map((message) => message.id), ['human', 'other-loop'])
+})
+
 test('pause and resume need a running loop', () => {
   const registered = []
   const ctx = {
@@ -477,7 +508,7 @@ test('projection unit folds the loop lifecycle without custom events', () => {
   assert.deepEqual(loopProjection.wire.viewSchema.parse(view(round2)), view(round2))
   assert.deepEqual(loopProjection.stateSchema.parse(running), running)
   assert.equal(view(round2), round2.loop)
-  assert.equal(loopProjection.stateVersion, 6, 'the fold identifies each loop invocation')
+  assert.equal(loopProjection.stateVersion, 7, 'the fold preserves unclaimed rounds across pauses')
 })
 
 test('a /loop that settles as an error never moves the pill', () => {
@@ -770,13 +801,30 @@ test('the fold follows only the turns its rounds opened', () => {
   assert.equal(interrupted.held, 1)
   const resumed = settled(interrupted, 'c3', 'resume')
   assert.equal(view(resumed).phase, 'active')
-  assert.equal(resumed.held, null)
+  assert.equal(resumed.held, 1, 'the resumed round stays unclaimed until its relay lands')
 
   // Paused mid-round: the completed round holds the next one.
   const paused = settled(loopProjection.apply(three, relay(1, 3)), 'c4', 'pause')
   const held = loopProjection.apply(paused, turnEnd('completed'))
   assert.equal(view(held).phase, 'paused')
   assert.equal(held.held, 2)
+})
+
+test('pausing before the first relay preserves round one across remounts and repeated pauses', () => {
+  let fold = settled(loopProjection.init({}, 0), 'first', '3 continue')
+  for (let attempt = 0; attempt < 2; attempt++) {
+    fold = settled(fold, `pause-${attempt}`, 'pause')
+    assert.equal(fold.held, 1)
+    const restarted = mountDriver(`unclaimed-${attempt}`, { stateOf: () => fold })
+    restarted.invoke('resume')
+    assert.match(restarted.followups[0].content.at(-1).text, /round 1\/3/)
+    fold = settled(fold, `resume-${attempt}`, 'resume')
+  }
+  fold = loopProjection.apply(fold, {
+    type: 'user/message',
+    data: { source: { kind: 'loop', loopId: 'first' }, content: [{ type: 'text', text: '[loop round 1/3]\ncontinue' }] },
+  })
+  assert.equal(fold.held, null, 'claiming the relay releases the held round')
 })
 
 test('a remount adopts the round in flight and the round a pause held', async () => {

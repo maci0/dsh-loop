@@ -125,7 +125,7 @@ const loopViewSchema = z.object({
 /**
  * Fold state: the view, the `/loop` invocation whose `command/run` row awaits
  * its `command/done`, whether the turn a round's relay opened is still
- * running (`inRound`), and the round a pause or an interruption holds back
+ * running (`inRound`), and an unclaimed round retained for pause/resume
  * (`held`). The executor appends `command/run` before attachment admission
  * and the handler, so a verb applies only once its paired `command/done`
  * settles as `success`. `inRound` and `held` mirror the driver's memory, so a
@@ -146,18 +146,19 @@ function settleVerb(state, args) {
   if (parsed.kind === 'loop') {
     // Round 1's relay always lands after this row: the agent appends it only
     // once its turn claims the inbox, past an await.
-    return { loop: { phase: 'active', command: parsed.command, rounds: parsed.rounds, run: 1 }, loopId: state.pending.commandId, pending: null, inRound: false, held: null }
+    return { loop: { phase: 'active', command: parsed.command, rounds: parsed.rounds, run: 1 }, loopId: state.pending.commandId, pending: null, inRound: false, held: 1 }
   }
   if (parsed.kind === 'stop') return { loop: null, loopId: state.pending.commandId, pending: null, inRound: false, held: null }
   if (loop === null) return { ...state, pending: null }
   if (parsed.kind === 'pause' && loop.phase === 'active') {
     // Paused between rounds, the driver holds the next round once its wait
     // for quiescence ends; a relay that still lands replaces this guess.
-    const held = state.inRound ? state.held : loop.run + 1
+    const held = state.inRound ? state.held : state.held ?? loop.run + 1
     return { ...state, loop: { ...loop, phase: 'paused' }, pending: null, held }
   }
   if (parsed.kind === 'resume' && loop.phase === 'paused') {
-    return { ...state, loop: { ...loop, phase: 'active' }, pending: null, held: null }
+    // Keep the unclaimed round until its relay lands, including another pause.
+    return { ...state, loop: { ...loop, phase: 'active' }, pending: null }
   }
   return { ...state, pending: null }
 }
@@ -214,7 +215,7 @@ export const loopProjection = {
     viewSchema: loopViewSchema,
     view: state => state.loop,
   },
-  stateVersion: 6,
+  stateVersion: 7,
 }
 
 /**
@@ -279,6 +280,17 @@ function liveLoop(ctx, state, session) {
   return adopted
 }
 
+/** Withdraw only this loop's unclaimed prompts; a running turn stays intact. */
+function withdrawRounds(agent, loop) {
+  let removed = false
+  for (const message of [...(agent.inbox?.nextTurn ?? [])]) {
+    if (message.source?.kind === 'loop' && (loop.id === undefined || message.source.loopId === loop.id)) {
+      if (agent.inbox.remove(message.id)) removed = true
+    }
+  }
+  return removed
+}
+
 function loopHandler(invocation, state, ctx) {
   const parsed = parseArgs(invocation.rawInput)
   if (parsed.kind === 'error') return { kind: 'error', text: parsed.text }
@@ -294,6 +306,7 @@ function loopHandler(invocation, state, ctx) {
   if (parsed.kind === 'stop') {
     const loop = liveLoop(ctx, state, invocation.agent.session)
     if (!loop) return { kind: 'success', text: 'No loop is running.' }
+    withdrawRounds(invocation.agent, loop)
     state.loops.delete(sessionId)
     return { kind: 'success', text: `Loop for "${loop.command}" stopped after ${loop.run} round(s).` }
   }
@@ -310,6 +323,7 @@ function loopHandler(invocation, state, ctx) {
     const loop = liveLoop(ctx, state, invocation.agent.session)
     if (!loop) return { kind: 'success', text: 'No loop is running.' }
     if (loop.paused) return { kind: 'success', text: `Loop for "${loop.command}" is already paused at round ${loop.run}.` }
+    if (withdrawRounds(invocation.agent, loop)) loop.held = loop.run
     loop.paused = true
     return { kind: 'success', text: `Loop for "${loop.command}" paused at round ${loop.run}.` }
   }
@@ -328,6 +342,8 @@ function loopHandler(invocation, state, ctx) {
     return { kind: 'success', text }
   }
 
+  const previous = liveLoop(ctx, state, invocation.agent.session)
+  if (previous) withdrawRounds(invocation.agent, previous)
   const loop = { id: invocation.commandId, command: parsed.command, rounds: parsed.rounds, run: 1 }
   state.loops.set(sessionId, loop)
   queueRound(invocation.agent, loop, 1, invocation.attachments)

@@ -33,12 +33,11 @@ Pause, Resume, and Stop buttons.
 > row added with `--patch` is an overlay: it disappears at the next start.
 
 ```sh
-dsh plugin --profile web add github:maci0/dsh-loop#v0.10.3
+dsh plugin --profile web add --save-exact @maci0/dsh-loop@0.11.0
 ```
 
-Pin a release tag: a bare `github:` spec floats on `main`. To upgrade, run the
-same command with the newer tag, then restart `dsh web` (bundle layers compose
-at boot).
+Pin an exact npm version. To upgrade, run the same command with the newer
+version, then restart `dsh web` (bundle layers compose at boot).
 
 The bundled `cordis.patch.yml` inserts the `loop` row automatically.
 
@@ -50,6 +49,8 @@ round until the budget is spent. `rounds = 0` never spends; `/loop stop`
 cancels at any time, and `/loop status` answers whether one is running or
 paused, and at which round. The pill shows the same state, but only the Web
 client has a pill. Loops are per-session.
+
+Stop removes queued prompts from that loop. An already running turn finishes.
 
 Only the turn a round's own queued message opened moves the loop. A turn
 already running when `/loop` was typed, or one you open between rounds,
