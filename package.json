@@ -1,6 +1,6 @@
 {
   "name": "@maci0/dsh-loop",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
@@ -47,7 +47,7 @@
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
-    "dsh": ">=0.2.1-rc.2 <0.3.0"
+    "dsh": ">=0.2.2-alpha.2 <0.3.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.5"
@@ -58,7 +58,7 @@
   },
   "icon": "./icon.svg",
   "dependencies": {
-    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.2-alpha.2",
     "zod": "^4.4.3"
   }
 }
