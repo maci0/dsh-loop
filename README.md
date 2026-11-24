@@ -28,14 +28,14 @@ Pause, Resume, and Stop buttons.
 
 ## Install
 
-Requires DeepSeek Harness `>=0.2.2-alpha.3 <0.3.0`. Restart DSH and refresh the browser after upgrading.
+Requires DeepSeek Harness `>=0.2.2-rc.4 <0.3.0`. Restart DSH and refresh the browser after upgrading.
 
 > **Install it as a bundle.** `dsh plugin add …` mounts the row from the
 > package's own patch layer, which is what the settings editor can write to. A
 > row added with `--patch` is an overlay: it disappears at the next start.
 
 ```sh
-dsh plugin --profile web add --save-exact @maci0/dsh-loop@0.12.2
+dsh plugin --profile web add --save-exact @maci0/dsh-loop@0.12.3
 ```
 
 Pin an exact npm version. To upgrade, run the same command with the newer
