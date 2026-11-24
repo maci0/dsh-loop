@@ -139,3 +139,47 @@ test('a failed verb shows in the pill, never as an unhandled rejection', async (
   assert.equal(textOf(label), 'continue')
   assert.equal(label.props.title, 'continue')
 })
+
+/** A `document` with just the head a stylesheet is appended to. */
+function createDocument() {
+  const head = { children: [], append: (node) => { head.children.push(node) } }
+  return {
+    head,
+    createElement: (tagName) => {
+      const attributes = new Map()
+      const node = {
+        tagName: tagName.toUpperCase(),
+        textContent: '',
+        setAttribute: (name, value) => { attributes.set(name, String(value)) },
+        getAttribute: (name) => attributes.get(name) ?? null,
+        remove: () => { head.children = head.children.filter((child) => child !== node) },
+      }
+      return node
+    },
+  }
+}
+
+test('apply installs one tagged stylesheet and dispose removes it', () => {
+  const exports = definition.factory(() => createReact())
+  const disposers = []
+  const document = createDocument()
+  const styles = () => document.head.children.filter((node) =>
+    node.tagName === 'STYLE' && node.getAttribute('data-plugin') === '@maci0/dsh-loop')
+  globalThis.document = document
+  try {
+    exports.apply({
+      effect: (callback) => {
+        const dispose = callback()
+        if (typeof dispose === 'function') disposers.push(dispose)
+      },
+      slots: { inject: () => {} },
+    })
+  } finally {
+    delete globalThis.document
+  }
+
+  assert.equal(styles().length, 1)
+  assert.match(styles()[0].textContent, /\.loop-pill/u)
+  for (const dispose of disposers.splice(0).reverse()) dispose()
+  assert.equal(styles().length, 0)
+})
